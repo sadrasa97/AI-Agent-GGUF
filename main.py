@@ -1,4 +1,3 @@
-```python
 
 """
 GGUF Code Agent
@@ -178,4 +177,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```

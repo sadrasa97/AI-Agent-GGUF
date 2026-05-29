@@ -1,4 +1,3 @@
-````md
 # GGUF Code Agent
 
 A professional terminal-based AI coding assistant powered entirely by local GGUF language models through `llama.cpp`.
@@ -296,5 +295,4 @@ The architecture is designed around the following engineering principles:
 * Terminal-native interaction
 * Extensible tooling architecture
 
-```
-```
+

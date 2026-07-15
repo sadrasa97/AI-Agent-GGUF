@@ -27,16 +27,18 @@ if __package__ is None or __package__ == "":
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QAction, QKeySequence, QIcon
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog, QMessageBox, QToolBar,
     QLabel, QWidget, QVBoxLayout, QInputDialog, QApplication, QLineEdit,
+    QStyle,
 )
 
 from config.settings import Settings
 from tools.code_tools import (
     build_workspace_context, list_workspace_files, save_code, CodeBlock,
+    resolve_workspace_path,
 )
 from ui_qt.editor import EditorTabs
 from ui_qt.file_explorer import FileExplorer
@@ -52,9 +54,39 @@ QMenuBar::item:selected { background-color: #2b2d31; }
 QMenu { background-color: #202124; color: #cccccc; border: 1px solid #303136; border-radius: 8px; padding: 4px; }
 QMenu::item { padding: 5px 12px; border-radius: 6px; }
 QMenu::item:selected { background-color: #2b2d31; }
-QToolBar { background-color: #202124; border: none; spacing: 6px; padding: 6px; }
-QToolBar QToolButton { border-radius: 8px; padding: 5px 10px; }
-QToolBar QToolButton:hover { background-color: #2b2d31; }
+QToolBar#MainToolbar {
+    background-color: #323233;
+    border: none;
+    border-bottom: 1px solid #1e1e1e;
+    spacing: 0px;
+    padding: 2px 4px;
+}
+QToolBar#MainToolbar QToolButton {
+    background: transparent;
+    color: #cccccc;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 3px;
+    margin: 1px;
+}
+QToolBar#MainToolbar QToolButton:hover {
+    background-color: #3f4043;
+}
+QToolBar#MainToolbar QToolButton:pressed {
+    background-color: #4a4a4d;
+}
+QToolBar#MainToolbar QToolButton:checked {
+    background-color: #4a4a4d;
+    border: 1px solid #5a5a5d;
+}
+QToolBar#MainToolbar QToolButton:disabled {
+    color: #5a5a5e;
+}
+QToolBar#MainToolbar::separator {
+    background-color: #3f4043;
+    width: 1px;
+    margin: 4px 6px;
+}
 QTabWidget::pane { border: none; background: #1a1b1e; top: -1px; }
 QTabBar { qproperty-drawBase: 0; }
 QTabBar::tab {
@@ -123,6 +155,7 @@ class MainWindow(QMainWindow):
         # ---- chat dock (right) ----
         self.chat_panel = ChatPanel(self.settings, self._workspace_context_for_chat)
         self.chat_panel.codeBlockReady.connect(self._on_code_block_from_chat)
+        self.chat_panel.agentFileEdit.connect(self._on_agent_file_edit)
         chat_dock = QDockWidget("CHAT", self)
         chat_dock.setWidget(self.chat_panel)
         chat_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -201,86 +234,132 @@ class MainWindow(QMainWindow):
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main")
+        toolbar.setObjectName("MainToolbar")
         toolbar.setMovable(False)
-        toolbar.setIconSize(toolbar.iconSize())
+        toolbar.setFloatable(False)
+        toolbar.setIconSize(QSize(16, 16))
+        toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         self.addToolBar(toolbar)
 
-        # -- file/project actions --
-        new_file_btn = QAction("📄 New File", self)
-        new_file_btn.setToolTip("New file in project")
+        style = self.style()
+
+        def std_icon(sp):
+            return style.standardIcon(sp)
+
+        # -- file/project actions (icon-only, VS Code title-bar style) --
+        new_file_btn = QAction(std_icon(QStyle.SP_FileIcon), "New File", self)
+        new_file_btn.setToolTip("New File (Ctrl+Alt+N)")
         new_file_btn.setShortcut("Ctrl+Alt+N")
         new_file_btn.triggered.connect(self._create_new_file)
         toolbar.addAction(new_file_btn)
 
-        new_folder_btn = QAction("📁 New Folder", self)
-        new_folder_btn.setToolTip("New folder in project")
+        new_folder_btn = QAction(std_icon(QStyle.SP_DirIcon), "New Folder", self)
+        new_folder_btn.setToolTip("New Folder (Ctrl+Alt+Shift+N)")
         new_folder_btn.setShortcut("Ctrl+Alt+Shift+N")
         new_folder_btn.triggered.connect(self._create_new_folder)
         toolbar.addAction(new_folder_btn)
 
-        open_file_btn = QAction("Open File", self)
+        open_file_btn = QAction(std_icon(QStyle.SP_DialogOpenButton), "Open File", self)
+        open_file_btn.setToolTip("Open File… (Ctrl+O)")
         open_file_btn.setShortcut(QKeySequence.Open)
         open_file_btn.triggered.connect(self._open_file_dialog)
         toolbar.addAction(open_file_btn)
 
-        open_folder_btn = QAction("Open Folder", self)
+        open_folder_btn = QAction(std_icon(QStyle.SP_DirOpenIcon), "Open Folder", self)
+        open_folder_btn.setToolTip("Open Folder…")
         open_folder_btn.triggered.connect(self._open_folder_dialog)
         toolbar.addAction(open_folder_btn)
 
-        save_btn = QAction("💾 Save", self)
-        save_btn.setToolTip("Save current file (Ctrl+S)")
+        toolbar.addSeparator()
+
+        save_btn = QAction(std_icon(QStyle.SP_DialogSaveButton), "Save", self)
+        save_btn.setToolTip("Save (Ctrl+S)")
         save_btn.setShortcut(QKeySequence.Save)
         save_btn.triggered.connect(lambda: self.editor_tabs.save_current())
         toolbar.addAction(save_btn)
 
-        save_as_btn = QAction("Save As", self)
+        save_as_btn = QAction(std_icon(QStyle.SP_DriveFDIcon), "Save As", self)
+        save_as_btn.setToolTip("Save As… (Ctrl+Shift+S)")
         save_as_btn.setShortcut(QKeySequence.SaveAs)
         save_as_btn.triggered.connect(lambda: self.editor_tabs.save_current(save_as=True))
         toolbar.addAction(save_as_btn)
 
         toolbar.addSeparator()
 
-        # -- panel toggle buttons --
-        toggle_explorer_btn = QAction("🗂 Explorer", self)
+        # -- undo / redo, applied to the active editor buffer --
+        undo_btn = QAction(std_icon(QStyle.SP_ArrowBack), "Undo", self)
+        undo_btn.setToolTip("Undo (Ctrl+Z)")
+        undo_btn.setShortcut(QKeySequence.Undo)
+        undo_btn.triggered.connect(lambda: self._active_editor_call("undo"))
+        toolbar.addAction(undo_btn)
+        self.undo_action = undo_btn
+
+        redo_btn = QAction(std_icon(QStyle.SP_ArrowForward), "Redo", self)
+        redo_btn.setToolTip("Redo (Ctrl+Y)")
+        redo_btn.setShortcut(QKeySequence.Redo)
+        redo_btn.triggered.connect(lambda: self._active_editor_call("redo"))
+        toolbar.addAction(redo_btn)
+        self.redo_action = redo_btn
+
+        toolbar.addSeparator()
+
+        # -- panel toggle buttons (icon-only, checkable like VS Code activity bar) --
+        toggle_explorer_btn = QAction(std_icon(QStyle.SP_FileDialogListView), "Explorer", self)
+        toggle_explorer_btn.setToolTip("Toggle Explorer")
         toggle_explorer_btn.setCheckable(True)
         toggle_explorer_btn.setChecked(True)
         toggle_explorer_btn.triggered.connect(
             lambda checked: self.explorer_dock.setVisible(checked)
         )
         self.explorer_dock.visibilityChanged.connect(toggle_explorer_btn.setChecked)
+        toolbar.addAction(toggle_explorer_btn)
 
-        toggle_chat_btn = QAction("💬 Chat", self)
+        toggle_chat_btn = QAction(std_icon(QStyle.SP_MessageBoxInformation), "Chat", self)
+        toggle_chat_btn.setToolTip("Toggle Chat")
         toggle_chat_btn.setCheckable(True)
         toggle_chat_btn.setChecked(True)
         toggle_chat_btn.triggered.connect(lambda checked: self.chat_dock.setVisible(checked))
         self.chat_dock.visibilityChanged.connect(toggle_chat_btn.setChecked)
+        toolbar.addAction(toggle_chat_btn)
 
-        toggle_output_btn = QAction("🧾 Output", self)
+        toggle_output_btn = QAction(std_icon(QStyle.SP_ComputerIcon), "Output", self)
+        toggle_output_btn.setToolTip("Toggle Terminal / Output")
         toggle_output_btn.setCheckable(True)
         toggle_output_btn.setChecked(True)
         toggle_output_btn.triggered.connect(lambda checked: self.output_dock.setVisible(checked))
         self.output_dock.visibilityChanged.connect(toggle_output_btn.setChecked)
-
-        for a in (toggle_explorer_btn, toggle_chat_btn, toggle_output_btn):
-            toolbar.addAction(a)
+        toolbar.addAction(toggle_output_btn)
 
         toolbar.addSeparator()
 
-        run_btn = QAction("▶️", self)
-        run_btn.setToolTip("Run active file (F5)")
+        run_btn = QAction(std_icon(QStyle.SP_MediaPlay), "Run", self)
+        run_btn.setToolTip("Run Active File (F5)")
         run_btn.setShortcut("F5")
         run_btn.triggered.connect(self._run_active_file)
         toolbar.addAction(run_btn)
 
-        settings_btn = QAction("⚙️", self)
+        settings_btn = QAction(std_icon(QStyle.SP_FileDialogDetailedView), "Settings", self)
         settings_btn.setToolTip("Model Settings")
         settings_btn.triggered.connect(self._open_model_settings_dialog)
         toolbar.addAction(settings_btn)
 
-        apply_ai_btn = QAction("✨ Apply AI", self)
-        apply_ai_btn.setToolTip("Apply last generated AI code")
+        apply_ai_btn = QAction(std_icon(QStyle.SP_DialogApplyButton), "Apply AI", self)
+        apply_ai_btn.setToolTip("Apply Last Generated AI Code")
         apply_ai_btn.triggered.connect(self._apply_last_generated_code)
         toolbar.addAction(apply_ai_btn)
+
+        # keep undo/redo enabled-state in sync with the active editor
+        self.editor_tabs.currentChanged.connect(lambda _i: self._sync_undo_redo_state())
+        self._sync_undo_redo_state()
+
+    def _sync_undo_redo_state(self):
+        editor = self.editor_tabs.current_editor()
+        has_editor = editor is not None
+        self.undo_action.setEnabled(has_editor and editor.document().isUndoAvailable())
+        self.redo_action.setEnabled(has_editor and editor.document().isRedoAvailable())
+        if editor is not None:
+            editor.undoAvailable.connect(self.undo_action.setEnabled)
+            editor.redoAvailable.connect(self.redo_action.setEnabled)
 
     # ──────────────────────────────────────────────────────────────
     # File actions
@@ -424,6 +503,52 @@ class MainWindow(QMainWindow):
         block = CodeBlock(language, code)
         self._last_generated_block = block
         self._apply_generated_code_block(block)
+
+    def _on_agent_file_edit(self, rel_path: str, language: str, code: str):
+        """Agent mode: write the model's output straight to disk, the same way
+        Copilot's agent mode edits/creates files without a manual apply step."""
+        workspace_root = self.settings.workspace_path.resolve()
+        try:
+            target = resolve_workspace_path(workspace_root, rel_path)
+        except ValueError:
+            self.output_panel.output.appendPlainText(
+                f"[agent] refused to write outside workspace: {rel_path}"
+            )
+            return
+
+        is_new = not target.exists()
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(code, encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Agent Edit Failed", f"{target}:\n{exc}")
+            return
+
+        # refresh explorer so newly created files/folders show up
+        self.explorer.model.setRootPath(str(self.settings.workspace_path))
+        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+
+        # reflect the change in an already-open tab, or open a new one
+        existing_editor = None
+        for i in range(self.editor_tabs.count()):
+            page = self.editor_tabs.widget(i)
+            if page.editor.file_path == target:
+                existing_editor = page.editor
+                self.editor_tabs.setCurrentIndex(i)
+                break
+        if existing_editor is not None:
+            existing_editor.setPlainText(code)
+            existing_editor.highlighter.set_extension(target.suffix.lstrip("."))
+            existing_editor.mark_clean()
+        else:
+            self.editor_tabs.open_file(target)
+
+        try:
+            rel_display = target.relative_to(workspace_root)
+        except ValueError:
+            rel_display = target
+        verb = "Created" if is_new else "Updated"
+        self.output_panel.output.appendPlainText(f"[agent] {verb}: {rel_display}")
 
     def _apply_generated_code_block(self, block: CodeBlock):
         options = [

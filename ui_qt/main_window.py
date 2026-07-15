@@ -1,0 +1,561 @@
+"""
+MainWindow — the VS Code-style shell.
+
+Layout:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Menu bar                                                     │
+  ├───┬─────────────┬───────────────────────────────┬───────────┤
+  │ A │  Explorer   │        Editor tabs             │   Chat    │
+  │ c │  (dock)     │        (center)                │  (dock)   │
+  │ t │             │                                 │           │
+  ├───┴─────────────┴───────────────────────────────┴───────────┤
+  │                     Output / Terminal (dock, bottom)          │
+  ├────────────────────────────────────────────────────────────────┤
+  │ Status bar: backend · model · workspace · cursor position     │
+  └────────────────────────────────────────────────────────────────┘
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+# Allow running this file directly: `python ui_qt/main_window.py`
+if __package__ is None or __package__ == "":
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QKeySequence, QIcon
+from PySide6.QtWidgets import (
+    QMainWindow, QDockWidget, QFileDialog, QMessageBox, QToolBar,
+    QLabel, QWidget, QVBoxLayout, QInputDialog, QApplication, QLineEdit,
+)
+
+from config.settings import Settings
+from tools.code_tools import (
+    build_workspace_context, list_workspace_files, save_code, CodeBlock,
+)
+from ui_qt.editor import EditorTabs
+from ui_qt.file_explorer import FileExplorer
+from ui_qt.chat_panel import ChatPanel
+from ui_qt.model_settings_dialog import ModelSettingsDialog
+from ui_qt.output_panel import OutputPanel
+
+DARK_STYLESHEET = """
+QMainWindow, QWidget { background-color: #1a1b1e; color: #d4d4d8; font-family: 'Segoe UI', 'Inter', sans-serif; }
+QMenuBar { background-color: #202124; color: #cccccc; padding: 2px; }
+QMenuBar::item { padding: 4px 10px; border-radius: 6px; }
+QMenuBar::item:selected { background-color: #2b2d31; }
+QMenu { background-color: #202124; color: #cccccc; border: 1px solid #303136; border-radius: 8px; padding: 4px; }
+QMenu::item { padding: 5px 12px; border-radius: 6px; }
+QMenu::item:selected { background-color: #2b2d31; }
+QToolBar { background-color: #202124; border: none; spacing: 6px; padding: 6px; }
+QToolBar QToolButton { border-radius: 8px; padding: 5px 10px; }
+QToolBar QToolButton:hover { background-color: #2b2d31; }
+QTabWidget::pane { border: none; background: #1a1b1e; top: -1px; }
+QTabBar { qproperty-drawBase: 0; }
+QTabBar::tab {
+    background: #202124;
+    color: #8a8b90;
+    padding: 8px 18px;
+    margin-right: 4px;
+    margin-top: 4px;
+    border: 1px solid transparent;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    font-size: 12px;
+}
+QTabBar::tab:selected {
+    background: #26272b;
+    color: #ffffff;
+    border: 1px solid #38393e;
+    border-bottom: none;
+    border-top: 2px solid #6c8cff;
+    padding-top: 7px;
+}
+QTabBar::tab:!selected {
+    margin-top: 7px;
+}
+QTabBar::tab:hover:!selected { background:#2b2d31; color:#c9c9cc; }
+QTabBar::close-button { image: none; subcontrol-position: right; }
+QTabBar::tab:hover QTabBar::close-button { background: #3a2c2c; border-radius: 4px; }
+QDockWidget { titlebar-close-icon: none; border: none; }
+QDockWidget::title { background:#202124; color:#a0a1a6; padding:8px 10px; font-weight:600; font-size:11px; letter-spacing:1px; }
+QScrollBar:vertical { background:#1a1b1e; width:10px; margin:2px; }
+QScrollBar::handle:vertical { background:#3a3b40; border-radius:5px; min-height:20px; }
+QScrollBar::handle:vertical:hover { background:#4a4b52; }
+QSplitter::handle { background:#1a1b1e; width:2px; }
+QPushButton { border-radius: 8px; }
+QLineEdit, QPlainTextEdit, QTextEdit { border-radius: 8px; }
+"""
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, settings: Settings):
+        super().__init__()
+        self.settings = settings
+        self._last_generated_block: CodeBlock | None = None
+        self.setWindowTitle("GGUF Code Agent — IDE")
+        self.resize(1440, 900)
+        self.setStyleSheet(DARK_STYLESHEET)
+
+        # ---- central editor tabs ----
+        self.editor_tabs = EditorTabs()
+        self.setCentralWidget(self.editor_tabs)
+        self.editor_tabs.fileSaved.connect(lambda _p: None)
+
+        # ---- explorer dock (left) ----
+        self.explorer = FileExplorer(self.settings.workspace_path)
+        self.explorer.fileActivated.connect(self.editor_tabs.open_file)
+        self.explorer.runRequested.connect(self._run_path)
+        self.explorer.newFileRequested.connect(self._create_file_in_directory)
+        self.explorer.newFolderRequested.connect(self._create_folder_in_directory)
+        explorer_dock = QDockWidget("EXPLORER", self)
+        explorer_dock.setWidget(self.explorer)
+        explorer_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.addDockWidget(Qt.LeftDockWidgetArea, explorer_dock)
+        self.explorer_dock = explorer_dock
+
+        # ---- chat dock (right) ----
+        self.chat_panel = ChatPanel(self.settings, self._workspace_context_for_chat)
+        self.chat_panel.codeBlockReady.connect(self._on_code_block_from_chat)
+        chat_dock = QDockWidget("CHAT", self)
+        chat_dock.setWidget(self.chat_panel)
+        chat_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.addDockWidget(Qt.RightDockWidgetArea, chat_dock)
+        self.chat_dock = chat_dock
+
+        self.resizeDocks([explorer_dock], [260], Qt.Horizontal)
+        self.resizeDocks([chat_dock], [420], Qt.Horizontal)
+
+        # ---- output dock (bottom) ----
+        self.output_panel = OutputPanel(self.settings.workspace_path)
+        output_dock = QDockWidget("OUTPUT", self)
+        output_dock.setWidget(self.output_panel)
+        output_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.addDockWidget(Qt.BottomDockWidgetArea, output_dock)
+        self.output_dock = output_dock
+        self.resizeDocks([output_dock], [200], Qt.Vertical)
+
+        # Keep a single top bar like VS Code command strip.
+        self.menuBar().hide()
+        self._build_toolbar()
+
+        self.editor_tabs.activeFileChanged.connect(self._on_active_file_changed)
+
+    # ──────────────────────────────────────────────────────────────
+    # Menus
+    # ──────────────────────────────────────────────────────────────
+    def _build_menus(self):
+        menubar = self.menuBar()
+
+        file_menu = menubar.addMenu("&File")
+        new_file_action = QAction("New File In Project…", self)
+        new_file_action.setShortcut("Ctrl+Alt+N")
+        new_file_action.triggered.connect(self._create_new_file)
+        new_folder_action = QAction("New Folder In Project…", self)
+        new_folder_action.setShortcut("Ctrl+Alt+Shift+N")
+        new_folder_action.triggered.connect(self._create_new_folder)
+        open_file_action = QAction("Open File…", self)
+        open_file_action.setShortcut(QKeySequence.Open)
+        open_file_action.triggered.connect(self._open_file_dialog)
+        open_folder_action = QAction("Open Folder…", self)
+        open_folder_action.triggered.connect(self._open_folder_dialog)
+        save_action = QAction("Save", self)
+        save_action.setShortcut(QKeySequence.Save)
+        save_action.triggered.connect(lambda: self.editor_tabs.save_current())
+        save_as_action = QAction("Save As…", self)
+        save_as_action.setShortcut(QKeySequence.SaveAs)
+        save_as_action.triggered.connect(lambda: self.editor_tabs.save_current(save_as=True))
+        for action in (
+            new_file_action,
+            new_folder_action,
+            open_file_action,
+            open_folder_action,
+            save_action,
+            save_as_action,
+        ):
+            file_menu.addAction(action)
+
+        run_menu = menubar.addMenu("&Run")
+        run_action = QAction("Run Active File", self)
+        run_action.setShortcut("F5")
+        run_action.triggered.connect(self._run_active_file)
+        run_menu.addAction(run_action)
+
+        settings_menu = menubar.addMenu("&Settings")
+        model_action = QAction("Model Setup…", self)
+        model_action.triggered.connect(self._open_model_settings_dialog)
+        settings_menu.addAction(model_action)
+
+        ai_menu = menubar.addMenu("&AI")
+        apply_last_action = QAction("Apply Last Generated Code…", self)
+        apply_last_action.triggered.connect(self._apply_last_generated_code)
+        ai_menu.addAction(apply_last_action)
+
+    def _build_toolbar(self):
+        toolbar = QToolBar("Main")
+        toolbar.setMovable(False)
+        toolbar.setIconSize(toolbar.iconSize())
+        self.addToolBar(toolbar)
+
+        # -- file/project actions --
+        new_file_btn = QAction("📄 New File", self)
+        new_file_btn.setToolTip("New file in project")
+        new_file_btn.setShortcut("Ctrl+Alt+N")
+        new_file_btn.triggered.connect(self._create_new_file)
+        toolbar.addAction(new_file_btn)
+
+        new_folder_btn = QAction("📁 New Folder", self)
+        new_folder_btn.setToolTip("New folder in project")
+        new_folder_btn.setShortcut("Ctrl+Alt+Shift+N")
+        new_folder_btn.triggered.connect(self._create_new_folder)
+        toolbar.addAction(new_folder_btn)
+
+        open_file_btn = QAction("Open File", self)
+        open_file_btn.setShortcut(QKeySequence.Open)
+        open_file_btn.triggered.connect(self._open_file_dialog)
+        toolbar.addAction(open_file_btn)
+
+        open_folder_btn = QAction("Open Folder", self)
+        open_folder_btn.triggered.connect(self._open_folder_dialog)
+        toolbar.addAction(open_folder_btn)
+
+        save_btn = QAction("💾 Save", self)
+        save_btn.setToolTip("Save current file (Ctrl+S)")
+        save_btn.setShortcut(QKeySequence.Save)
+        save_btn.triggered.connect(lambda: self.editor_tabs.save_current())
+        toolbar.addAction(save_btn)
+
+        save_as_btn = QAction("Save As", self)
+        save_as_btn.setShortcut(QKeySequence.SaveAs)
+        save_as_btn.triggered.connect(lambda: self.editor_tabs.save_current(save_as=True))
+        toolbar.addAction(save_as_btn)
+
+        toolbar.addSeparator()
+
+        # -- panel toggle buttons --
+        toggle_explorer_btn = QAction("🗂 Explorer", self)
+        toggle_explorer_btn.setCheckable(True)
+        toggle_explorer_btn.setChecked(True)
+        toggle_explorer_btn.triggered.connect(
+            lambda checked: self.explorer_dock.setVisible(checked)
+        )
+        self.explorer_dock.visibilityChanged.connect(toggle_explorer_btn.setChecked)
+
+        toggle_chat_btn = QAction("💬 Chat", self)
+        toggle_chat_btn.setCheckable(True)
+        toggle_chat_btn.setChecked(True)
+        toggle_chat_btn.triggered.connect(lambda checked: self.chat_dock.setVisible(checked))
+        self.chat_dock.visibilityChanged.connect(toggle_chat_btn.setChecked)
+
+        toggle_output_btn = QAction("🧾 Output", self)
+        toggle_output_btn.setCheckable(True)
+        toggle_output_btn.setChecked(True)
+        toggle_output_btn.triggered.connect(lambda checked: self.output_dock.setVisible(checked))
+        self.output_dock.visibilityChanged.connect(toggle_output_btn.setChecked)
+
+        for a in (toggle_explorer_btn, toggle_chat_btn, toggle_output_btn):
+            toolbar.addAction(a)
+
+        toolbar.addSeparator()
+
+        run_btn = QAction("▶️", self)
+        run_btn.setToolTip("Run active file (F5)")
+        run_btn.setShortcut("F5")
+        run_btn.triggered.connect(self._run_active_file)
+        toolbar.addAction(run_btn)
+
+        settings_btn = QAction("⚙️", self)
+        settings_btn.setToolTip("Model Settings")
+        settings_btn.triggered.connect(self._open_model_settings_dialog)
+        toolbar.addAction(settings_btn)
+
+        apply_ai_btn = QAction("✨ Apply AI", self)
+        apply_ai_btn.setToolTip("Apply last generated AI code")
+        apply_ai_btn.triggered.connect(self._apply_last_generated_code)
+        toolbar.addAction(apply_ai_btn)
+
+    # ──────────────────────────────────────────────────────────────
+    # File actions
+    # ──────────────────────────────────────────────────────────────
+    def _open_file_dialog(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Open File", str(self.settings.workspace_path))
+        if filename:
+            self.editor_tabs.open_file(Path(filename))
+
+    def _open_folder_dialog(self):
+        folder = QFileDialog.getExistingDirectory(self, "Open Folder", str(self.settings.workspace_path))
+        if folder:
+            self.settings.workspace = folder
+            self.settings.save()
+            self.explorer.set_workspace(Path(folder))
+            self.output_panel.set_working_directory(Path(folder))
+
+    def _selected_base_directory(self) -> Path:
+        index = self.explorer.tree.currentIndex()
+        if index.isValid():
+            selected = Path(self.explorer.model.filePath(index))
+            return selected if selected.is_dir() else selected.parent
+        return self.settings.workspace_path
+
+    def _create_new_file(self):
+        self._create_file_in_directory(self._selected_base_directory())
+
+    def _create_new_folder(self):
+        self._create_folder_in_directory(self._selected_base_directory())
+
+    def _create_file_in_directory(self, base_dir: Path):
+        text, ok = QInputDialog.getText(self, "New File", "File name (or relative path):")
+        if not ok:
+            return
+        relative = text.strip().replace("\\", "/")
+        if not relative:
+            return
+
+        target = (base_dir / relative).resolve()
+        workspace_root = self.settings.workspace_path.resolve()
+        try:
+            target.relative_to(workspace_root)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Path", "File must be inside the current workspace.")
+            return
+
+        if target.exists():
+            QMessageBox.warning(self, "Already Exists", f"File already exists:\n{target}")
+            return
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("", encoding="utf-8")
+        except Exception as exc:
+            QMessageBox.critical(self, "Create File Failed", str(exc))
+            return
+
+        self.explorer.model.setRootPath(str(self.settings.workspace_path))
+        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+        self.editor_tabs.open_file(target)
+
+    def _create_folder_in_directory(self, base_dir: Path):
+        text, ok = QInputDialog.getText(self, "New Folder", "Folder name (or relative path):")
+        if not ok:
+            return
+        relative = text.strip().replace("\\", "/")
+        if not relative:
+            return
+
+        target = (base_dir / relative).resolve()
+        workspace_root = self.settings.workspace_path.resolve()
+        try:
+            target.relative_to(workspace_root)
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Path", "Folder must be inside the current workspace.")
+            return
+
+        if target.exists():
+            QMessageBox.warning(self, "Already Exists", f"Folder already exists:\n{target}")
+            return
+
+        try:
+            target.mkdir(parents=True, exist_ok=False)
+        except Exception as exc:
+            QMessageBox.critical(self, "Create Folder Failed", str(exc))
+            return
+
+        self.explorer.model.setRootPath(str(self.settings.workspace_path))
+        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+
+    def _active_editor_call(self, method_name: str):
+        editor = self.editor_tabs.current_editor()
+        if editor:
+            getattr(editor, method_name)()
+
+    def _on_active_file_changed(self, path):
+        if path:
+            self.setWindowTitle(f"{Path(path).name} — GGUF Code Agent")
+        else:
+            self.setWindowTitle("GGUF Code Agent — IDE")
+
+    # ──────────────────────────────────────────────────────────────
+    # Run
+    # ──────────────────────────────────────────────────────────────
+    def _run_active_file(self):
+        editor = self.editor_tabs.current_editor()
+        if editor is None:
+            QMessageBox.information(self, "Run", "No file open.")
+            return
+        if editor.file_path is None or editor.is_dirty:
+            self.editor_tabs.save_current()
+            editor = self.editor_tabs.current_editor()
+        if editor.file_path is None:
+            return
+        self._run_path(editor.file_path)
+
+    def _run_path(self, path: Path):
+        """Run a specific file on disk (opening it in the editor first if needed)."""
+        self.editor_tabs.open_file(path)
+        editor = self.editor_tabs.current_editor()
+        if editor is not None and editor.is_dirty:
+            self.editor_tabs.save_current()
+        if not self.output_panel.execute_file(path):
+            QMessageBox.information(self, "Run", f"No runner registered for {path.suffix} files.")
+            return
+        self.output_dock.setVisible(True)
+        self.output_dock.raise_()
+
+    # ──────────────────────────────────────────────────────────────
+    # Chat <-> editor bridge
+    # ──────────────────────────────────────────────────────────────
+    def _workspace_context_for_chat(self) -> str:
+        recent = []
+        editor = self.editor_tabs.current_editor()
+        if editor and editor.file_path:
+            recent = [editor.file_path]
+        return build_workspace_context(self.settings.workspace_path, recent_files=recent)
+
+    def _on_code_block_from_chat(self, language: str, code: str):
+        """Apply generated code in a user-selected way (replace/insert/new/save)."""
+        block = CodeBlock(language, code)
+        self._last_generated_block = block
+        self._apply_generated_code_block(block)
+
+    def _apply_generated_code_block(self, block: CodeBlock):
+        options = [
+            "Open as new tab",
+            "Replace active file content",
+            "Insert at cursor",
+            "Save directly to workspace file",
+        ]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Apply AI Code",
+            "How should generated code be applied?",
+            options,
+            0,
+            False,
+        )
+        if not ok:
+            return
+
+        if choice == "Open as new tab":
+            self.editor_tabs.new_untitled(template_code=block.code, language=block.extension)
+            return
+
+        editor = self.editor_tabs.current_editor()
+
+        if choice == "Replace active file content":
+            if editor is None:
+                self.editor_tabs.new_untitled(template_code=block.code, language=block.extension)
+                return
+            editor.setPlainText(block.code)
+            if editor.file_path is not None:
+                editor.highlighter.set_extension(editor.file_path.suffix.lstrip("."))
+            else:
+                editor.highlighter.set_extension(block.extension)
+            return
+
+        if choice == "Insert at cursor":
+            if editor is None:
+                self.editor_tabs.new_untitled(template_code=block.code, language=block.extension)
+                return
+            cursor = editor.textCursor()
+            cursor.insertText(block.code)
+            editor.setTextCursor(cursor)
+            return
+
+        if choice == "Save directly to workspace file":
+            start_dir = str(self.settings.workspace_path)
+            default_name = f"generated.{block.extension}"
+            filename, _ = QFileDialog.getSaveFileName(self, "Save Generated Code", str(Path(start_dir) / default_name))
+            if not filename:
+                return
+            out_path = Path(filename)
+            workspace_root = self.settings.workspace_path.resolve()
+            try:
+                out_path.resolve().relative_to(workspace_root)
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Path", "Target file must be inside the current workspace.")
+                return
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(block.code, encoding="utf-8")
+            except Exception as exc:
+                QMessageBox.critical(self, "Save Failed", str(exc))
+                return
+            self.explorer.model.setRootPath(str(self.settings.workspace_path))
+            self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+            self.editor_tabs.open_file(out_path)
+
+    # ──────────────────────────────────────────────────────────────
+    # Settings dialogs
+    # ──────────────────────────────────────────────────────────────
+    def _open_model_settings_dialog(self):
+        dialog = ModelSettingsDialog(self.settings, self)
+        if dialog.exec():
+            self.chat_panel.backend_combo.setCurrentText(self.settings.backend)
+
+    def _apply_last_generated_code(self):
+        if self._last_generated_block is None:
+            QMessageBox.information(self, "AI", "No generated code block available yet.")
+            return
+        self._apply_generated_code_block(self._last_generated_block)
+
+    def _set_openrouter_key(self):
+        text, ok = QInputDialog.getText(
+            self, "OpenRouter API Key", "Key:", QLineEdit.Password, self.settings.openrouter_api_key,
+        )
+        if ok:
+            self.settings.openrouter_api_key = text.strip()
+            self.settings.save()
+
+    def _set_nvidia_key(self):
+        text, ok = QInputDialog.getText(
+            self, "NVIDIA API Key", "Key:", QLineEdit.Password, self.settings.nvidia_api_key,
+        )
+        if ok:
+            self.settings.nvidia_api_key = text.strip()
+            self.settings.save()
+
+    def _set_openrouter_model(self):
+        text, ok = QInputDialog.getText(
+            self, "OpenRouter Model", "Model id (e.g. qwen/qwen-2.5-coder-32b-instruct):",
+            text=self.settings.openrouter_model,
+        )
+        if ok and text.strip():
+            self.settings.openrouter_model = text.strip()
+            self.settings.save()
+
+    def _set_nvidia_model(self):
+        text, ok = QInputDialog.getText(
+            self, "NVIDIA Model", "Model id (e.g. meta/llama-3.1-70b-instruct):",
+            text=self.settings.nvidia_model,
+        )
+        if ok and text.strip():
+            self.settings.nvidia_model = text.strip()
+            self.settings.save()
+
+    def _set_gguf_path(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Select GGUF Model", str(Path(self.settings.model_path).parent) if self.settings.model_path else "",
+            "GGUF Models (*.gguf)",
+        )
+        if filename:
+            self.settings.model_path = filename
+            self.settings.save()
+
+    # ──────────────────────────────────────────────────────────────
+    def closeEvent(self, event):
+        dirty_tabs = [i for i in range(self.editor_tabs.count()) if self.editor_tabs.widget(i).is_dirty]
+        if dirty_tabs:
+            resp = QMessageBox.question(
+                self, "Unsaved changes", "You have unsaved files. Quit anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if resp == QMessageBox.No:
+                event.ignore()
+                return
+        self.output_panel.shutdown()
+        self.settings.save()
+        event.accept()

@@ -1,9 +1,4 @@
-# Core — required
-llama-cpp-python>=0.2.90
-
-# UI — strongly recommended (falls back to plain ANSI if missing)
-rich>=13.0.0
-
-# Optional: better readline / input history in the REPL
-readline; sys_platform != "win32"
-pyreadline3; sys_platform == "win32"
+PySide6>=6.6
+requests>=2.31
+llama-cpp-python>=0.2.79
+rich>=13.0

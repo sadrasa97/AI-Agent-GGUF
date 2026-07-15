@@ -54,7 +54,7 @@ EXT_MAP: dict[str, str] = {
 # Runner map  (lang → how to run a file)
 # ─────────────────────────────────────────────
 RUNNER_MAP: dict[str, list[str]] = {
-    "py":   ["python3", "{file}"],
+    "py":   [sys.executable, "{file}"],
     "js":   ["node", "{file}"],
     "ts":   ["npx", "ts-node", "{file}"],
     "sh":   ["bash", "{file}"],
@@ -101,6 +101,14 @@ def _is_within_workspace(workspace: Path, candidate: Path) -> bool:
         candidate.resolve().relative_to(workspace.resolve())
         return True
     except Exception:
+        return False
+
+
+def _safe_is_file(path: Path) -> bool:
+    """Best-effort file check that tolerates unreadable/corrupted entries."""
+    try:
+        return path.is_file()
+    except OSError:
         return False
 
 
@@ -181,7 +189,7 @@ def _match_workspace_file(workspace: Path, query: str, files: list[Path]) -> Opt
         except ValueError:
             resolved = None
         else:
-            if resolved.exists() and resolved.is_file():
+            if resolved.exists() and _safe_is_file(resolved):
                 return resolved
 
     normalized_files: list[tuple[Path, str, str]] = []
@@ -244,7 +252,7 @@ def list_workspace_files(
     for path in workspace.rglob("*"):
         if len(files) >= max_files:
             break
-        if not path.is_file():
+        if not _safe_is_file(path):
             continue
         try:
             rel = path.relative_to(workspace)
@@ -291,13 +299,13 @@ def build_workspace_context(
     for path in recent_files:
         try:
             resolved = path.resolve()
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError):
             continue
         if resolved in seen:
             continue
         if not _is_within_workspace(workspace, resolved):
             continue
-        if not resolved.is_file():
+        if not _safe_is_file(resolved):
             continue
         seen.add(resolved)
         recent_unique.append(resolved)
@@ -318,7 +326,14 @@ def build_workspace_context(
             indented = "\n".join(f"    {line}" for line in content.splitlines())
             lines.append(indented if indented else "    (empty file)")
 
-    recent_files_to_include = [path for path in recent_unique if path.resolve() not in requested_set]
+    recent_files_to_include: list[Path] = []
+    for path in recent_unique:
+        try:
+            if path.resolve() in requested_set:
+                continue
+        except OSError:
+            continue
+        recent_files_to_include.append(path)
     if recent_files_to_include:
         lines.append("")
         lines.append("Recently opened files:")

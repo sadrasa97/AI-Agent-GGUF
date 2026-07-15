@@ -223,7 +223,7 @@ class ChatPanel(QWidget):
         self._worker: Optional[GenerationWorker] = None
         self._response_buffer = ""
         self._attachments: list[Path] = []
-        self.mode = "Chat"  # "Chat" or "Plan"
+        self.mode = "Agent"  # "Chat", "Agent", or "Plan" — Agent is the default
         self._current_assistant_bubble: Optional[ChatBubble] = None
 
         self.setStyleSheet("background:#1a1b1e;")
@@ -250,30 +250,6 @@ class ChatPanel(QWidget):
         title.setStyleSheet("color:#9a9ba1; font-weight:600; font-size:11px; letter-spacing:1.5px;")
         header.addWidget(title)
         header.addStretch()
-
-        self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Chat", "Agent", "Plan"])
-        self.mode_combo.setToolTip(
-            "Chat: normal coding assistant, you choose how to apply code.\n"
-            "Agent: model edits existing files and creates new ones directly, like Copilot Agent mode.\n"
-            "Plan: model first drafts a step-by-step plan before writing any code."
-        )
-        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
-        self.mode_combo.setStyleSheet(
-            "QComboBox { background:#2b2d31; color:#ddd; padding:3px 10px; border:1px solid #38393e; "
-            "border-radius:10px; } QComboBox::drop-down { border:none; }"
-        )
-        header.addWidget(self.mode_combo)
-
-        self.backend_combo = QComboBox()
-        self.backend_combo.addItems(["gguf", "openrouter", "nvidia"])
-        self.backend_combo.setCurrentText(self.settings.backend)
-        self.backend_combo.currentTextChanged.connect(self._on_backend_changed)
-        self.backend_combo.setStyleSheet(
-            "QComboBox { background:#2b2d31; color:#ddd; padding:3px 10px; border:1px solid #38393e; "
-            "border-radius:10px; } QComboBox::drop-down { border:none; }"
-        )
-        header.addWidget(self.backend_combo)
         layout.addLayout(header)
 
         sep = QFrame()
@@ -328,14 +304,31 @@ class ChatPanel(QWidget):
         composer_layout.addWidget(self.input_box)
 
         composer_btn_row = QHBoxLayout()
-        composer_btn_row.setSpacing(6)
+        composer_btn_row.setSpacing(5)
 
-        self.attach_btn = QPushButton("📎 Attach")
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Agent", "Chat", "Plan"])
+        self.mode_combo.setCurrentText(self.mode)
+        self.mode_combo.setToolTip(
+            "Agent: model edits existing files and creates new files/folders directly, like Copilot Agent mode.\n"
+            "Chat: normal coding assistant, you choose how to apply code.\n"
+            "Plan: model first drafts a step-by-step plan before writing any code."
+        )
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        composer_btn_row.addWidget(self.mode_combo)
+
+        self.backend_combo = QComboBox()
+        self.backend_combo.addItems(["gguf", "openrouter", "nvidia"])
+        self.backend_combo.setCurrentText(self.settings.backend)
+        self.backend_combo.currentTextChanged.connect(self._on_backend_changed)
+        composer_btn_row.addWidget(self.backend_combo)
+
+        self.attach_btn = QPushButton("📎")
         self.attach_btn.setToolTip("Attach a file to share with the model")
         self.attach_btn.clicked.connect(self.attach_file)
         composer_btn_row.addWidget(self.attach_btn)
 
-        self.clear_btn = QPushButton("Clear")
+        self.clear_btn = QPushButton("🗑")
         self.clear_btn.setToolTip("Clear conversation")
         self.clear_btn.clicked.connect(self.clear_history)
         composer_btn_row.addWidget(self.clear_btn)
@@ -343,35 +336,53 @@ class ChatPanel(QWidget):
         composer_btn_row.addStretch()
 
         self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setToolTip("Stop generation")
         self.stop_btn.clicked.connect(self.stop_generation)
         self.stop_btn.setEnabled(False)
-        self.send_btn = QPushButton("Send ➤")
-        self.send_btn.clicked.connect(self.send_message)
         composer_btn_row.addWidget(self.stop_btn)
+
+        self.send_btn = QPushButton("➤")
+        self.send_btn.setToolTip("Send (Enter)")
+        self.send_btn.clicked.connect(self.send_message)
         composer_btn_row.addWidget(self.send_btn)
         composer_layout.addLayout(composer_btn_row)
 
-        self.attach_btn.setStyleSheet(
-            "QPushButton { background:#232427; color:#c9c9cc; padding:6px 12px; border:1px solid #38393e; "
-            "border-radius:10px; font-size:12px; }"
-            "QPushButton:hover { background:#2f3034; }"
+        # ---- small, pill-shaped, understated buttons/pickers ----
+        combo_style = (
+            "QComboBox { background:#232427; color:#c9c9cc; padding:3px 8px; border:1px solid #38393e; "
+            "border-radius:9px; font-size:10.5px; font-weight:600; min-height:18px; }"
+            "QComboBox:hover { background:#2a2b30; border:1px solid #47484d; }"
+            "QComboBox::drop-down { border:none; width:14px; }"
+            "QComboBox QAbstractItemView { background:#232427; color:#ddd; selection-background-color:#3a3b40; "
+            "border:1px solid #38393e; outline:none; }"
         )
+        self.mode_combo.setStyleSheet(combo_style)
+        self.backend_combo.setStyleSheet(combo_style)
+
+        icon_btn_style = (
+            "QPushButton { background:#232427; color:#c9c9cc; padding:4px 7px; border:1px solid #38393e; "
+            "border-radius:9px; font-size:11px; min-width:14px; }"
+            "QPushButton:hover { background:#2f3034; border:1px solid #47484d; }"
+            "QPushButton:pressed { background:#1e1f22; }"
+        )
+        self.attach_btn.setStyleSheet(icon_btn_style)
         self.clear_btn.setStyleSheet(
-            "QPushButton { background:#232427; color:#8a8b90; padding:4px 8px; border:1px solid #38393e; "
-            "border-radius:9px; font-size:11px; }"
-            "QPushButton:hover { background:#2f3034; color:#c9c9cc; }"
+            icon_btn_style.replace("color:#c9c9cc", "color:#8a8b90").replace(
+                "QPushButton:hover { background:#2f3034;", "QPushButton:hover { background:#3a2c2c; color:#f48771;"
+            )
         )
         self.stop_btn.setStyleSheet(
-            "QPushButton { background:#2b2d31; color:#c9c9cc; padding:6px 14px; border:1px solid #38393e; "
-            "border-radius:10px; }"
-            "QPushButton:hover { background:#35363b; }"
-            "QPushButton:disabled { background:#232427; color:#5a5a5e; border:1px solid #2c2d31; }"
+            "QPushButton { background:#232427; color:#c9c9cc; padding:4px 12px; border:1px solid #38393e; "
+            "border-radius:9px; font-size:11px; font-weight:600; }"
+            "QPushButton:hover { background:#3a2c2c; color:#f48771; border:1px solid #5a3535; }"
+            "QPushButton:disabled { background:#1e1f22; color:#4a4a4e; border:1px solid #262729; }"
         )
         self.send_btn.setStyleSheet(
-            "QPushButton { background:#6c8cff; color:white; padding:6px 16px; border:none; "
-            "border-radius:10px; font-weight:600; }"
+            "QPushButton { background:#6c8cff; color:white; padding:4px 12px; border:none; "
+            "border-radius:9px; font-weight:700; font-size:12px; min-width:22px; }"
             "QPushButton:hover { background:#7d9aff; }"
-            "QPushButton:disabled { background:#3c3c3c; color:#888; }"
+            "QPushButton:pressed { background:#5b78e0; }"
+            "QPushButton:disabled { background:#33343a; color:#6a6a6e; }"
         )
 
         outer_composer_row = QHBoxLayout()

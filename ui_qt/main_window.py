@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Allow running this file directly: `python ui_qt/main_window.py`
@@ -115,6 +116,7 @@ class MainWindow(QMainWindow):
         explorer_dock = QDockWidget("EXPLORER", self)
         explorer_dock.setWidget(self.explorer)
         explorer_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        explorer_dock.setTitleBarWidget(QWidget())
         self.addDockWidget(Qt.LeftDockWidgetArea, explorer_dock)
         self.explorer_dock = explorer_dock
 
@@ -124,6 +126,7 @@ class MainWindow(QMainWindow):
         chat_dock = QDockWidget("CHAT", self)
         chat_dock.setWidget(self.chat_panel)
         chat_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        chat_dock.setTitleBarWidget(QWidget())
         self.addDockWidget(Qt.RightDockWidgetArea, chat_dock)
         self.chat_dock = chat_dock
 
@@ -135,6 +138,7 @@ class MainWindow(QMainWindow):
         output_dock = QDockWidget("OUTPUT", self)
         output_dock.setWidget(self.output_panel)
         output_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        output_dock.setTitleBarWidget(QWidget())
         self.addDockWidget(Qt.BottomDockWidgetArea, output_dock)
         self.output_dock = output_dock
         self.resizeDocks([output_dock], [200], Qt.Vertical)
@@ -427,6 +431,7 @@ class MainWindow(QMainWindow):
             "Replace active file content",
             "Insert at cursor",
             "Save directly to workspace file",
+            "Save as new file and run",
         ]
         choice, ok = QInputDialog.getItem(
             self,
@@ -487,6 +492,35 @@ class MainWindow(QMainWindow):
             self.explorer.model.setRootPath(str(self.settings.workspace_path))
             self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
             self.editor_tabs.open_file(out_path)
+            return
+
+        if choice == "Save as new file and run":
+            out_path = self._auto_generated_file_path(block)
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(block.code, encoding="utf-8")
+            except Exception as exc:
+                QMessageBox.critical(self, "Save Failed", str(exc))
+                return
+
+            self.explorer.model.setRootPath(str(self.settings.workspace_path))
+            self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+            self.editor_tabs.open_file(out_path)
+            self._run_path(out_path)
+
+    def _auto_generated_file_path(self, block: CodeBlock) -> Path:
+        generated_dir = self.settings.workspace_path / "generated"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = generated_dir / f"generated_{stamp}.{block.extension}"
+        if not base.exists():
+            return base
+
+        idx = 1
+        while True:
+            candidate = generated_dir / f"generated_{stamp}_{idx}.{block.extension}"
+            if not candidate.exists():
+                return candidate
+            idx += 1
 
     # ──────────────────────────────────────────────────────────────
     # Settings dialogs

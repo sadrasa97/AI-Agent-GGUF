@@ -81,8 +81,8 @@ class TerminalOutputEdit(QPlainTextEdit):
 
 class OutputPanel(QWidget):
     SHELLS: dict[str, tuple[str, list[str]]] = {
-        "PowerShell": ("powershell.exe", ["-NoLogo", "-NoProfile"]),
-        "Command Prompt": ("cmd.exe", ["/Q"]),
+        "PowerShell": ("powershell.exe", ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass"]),
+        "Command Prompt": ("cmd.exe", ["/Q", "/K"]),
     }
 
     def __init__(self, workspace_path: Path, settings: Settings, parent=None):
@@ -152,6 +152,9 @@ class OutputPanel(QWidget):
             return
         if self.process.state() != QProcess.Running:
             self._restart_terminal(self.shell_combo.currentText())
+        if self.process.state() != QProcess.Running:
+            self.output.appendPlainText("[terminal] shell is not running.")
+            return
         self.process.write((command + "\n").encode("utf-8"))
 
     def _handle_ai_task(self, command: str):
@@ -296,6 +299,9 @@ class OutputPanel(QWidget):
         self.process.setWorkingDirectory(str(self.workspace_path))
         self.output.appendPlainText(f"\n[terminal] starting {shell_name} in {self.workspace_path}")
         self.process.start(program, args)
+        if not self.process.waitForStarted(3000):
+            self.output.appendPlainText(f"[terminal] failed to start {shell_name}.")
+            return
 
     def _send_cd(self, path: Path):
         shell_name = self.shell_combo.currentText()

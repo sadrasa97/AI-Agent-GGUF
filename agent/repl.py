@@ -5,6 +5,7 @@ Ties together the LLM engine, tool calls, and terminal UI.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -139,6 +140,8 @@ class CodeAgentREPL:
             "/tree":      self._cmd_tree,
             "/open":      lambda: self._cmd_open(arg),
             "/cat":       lambda: self._cmd_open(arg),
+            "/regex":     lambda: self._cmd_regex(arg),
+            "/ps":        lambda: self._cmd_powershell(arg),
             "/workspace": self._cmd_workspace,
             "/exit":      self._cmd_exit,
             "/quit":      self._cmd_exit,
@@ -255,6 +258,66 @@ class CodeAgentREPL:
             print_success(f"Opened {path} in VS Code.")
         except FileNotFoundError:
             print_info(f"VS Code CLI not found. Workspace path: {path}")
+
+    def _cmd_regex(self, pattern: Optional[str]):
+        if not pattern:
+            print_error("Usage: /regex <pattern>")
+            return
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            print_error(f"Invalid regex: {exc}")
+            return
+
+        matches = 0
+        workspace = self.settings.workspace_path
+        files = list_workspace_files(workspace, max_depth=10, max_files=4000)
+        for path in files:
+            try:
+                content = read_text_file(path, max_bytes=500_000)
+            except Exception:
+                continue
+            for line_no, line in enumerate(content.splitlines(), start=1):
+                if regex.search(line):
+                    rel = path.relative_to(workspace).as_posix()
+                    print(f"{rel}:{line_no}: {line.strip()}")
+                    matches += 1
+                    if matches >= 120:
+                        print_info("Match limit reached (120).")
+                        return
+        if matches == 0:
+            print_info("No matches found.")
+
+    def _cmd_powershell(self, command: Optional[str]):
+        if not command:
+            print_error("Usage: /ps <powershell-command>")
+            return
+        print_info(f"Running PowerShell in workspace: {command}")
+        try:
+            result = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ],
+                cwd=str(self.settings.workspace_path),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception as exc:
+            print_error(f"PowerShell command failed: {exc}")
+            return
+
+        print(f"ExitCode: {result.returncode}")
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        if result.stderr.strip():
+            print_error(result.stderr.strip())
 
     def _cmd_exit(self):
         print("👋 Bye!")

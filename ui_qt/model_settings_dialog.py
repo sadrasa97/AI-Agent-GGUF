@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QVBoxLayout,
     QFormLayout,
@@ -13,9 +14,13 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QDialogButtonBox,
     QFileDialog,
+    QCheckBox,
+    QMessageBox,
 )
+from PySide6.QtCore import Qt
 
 from config.settings import Settings
+from tools.model_manager import ensure_default_gguf_model
 
 
 class ModelSettingsDialog(QDialog):
@@ -45,6 +50,9 @@ class ModelSettingsDialog(QDialog):
         gguf_path_row.addWidget(self.gguf_path_edit, 1)
         gguf_path_row.addWidget(browse_btn)
         gguf_form.addRow("Model path", gguf_path_row)
+        self.auto_download_gguf_checkbox = QCheckBox("Auto-download default GGUF model when GGUF backend is selected")
+        self.auto_download_gguf_checkbox.setChecked(self.settings.auto_download_default_gguf)
+        gguf_form.addRow("Default model", self.auto_download_gguf_checkbox)
         root.addWidget(gguf_group)
 
         openrouter_group = QGroupBox("OpenRouter")
@@ -86,9 +94,37 @@ class ModelSettingsDialog(QDialog):
     def _save_and_accept(self):
         self.settings.backend = self.backend_combo.currentText().strip() or self.settings.backend
         self.settings.model_path = self.gguf_path_edit.text().strip()
+        self.settings.auto_download_default_gguf = self.auto_download_gguf_checkbox.isChecked()
         self.settings.openrouter_api_key = self.openrouter_key_edit.text().strip()
         self.settings.openrouter_model = self.openrouter_model_edit.text().strip() or self.settings.openrouter_model
         self.settings.nvidia_api_key = self.nvidia_key_edit.text().strip()
         self.settings.nvidia_model = self.nvidia_model_edit.text().strip() or self.settings.nvidia_model
+
+        needs_default_download = (
+            self.settings.backend == "gguf"
+            and self.settings.auto_download_default_gguf
+            and not Path(self.settings.model_path).expanduser().is_file()
+        )
+        if needs_default_download:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                model_path, downloaded = ensure_default_gguf_model(self.settings)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(
+                    self,
+                    "GGUF Download Failed",
+                    f"Could not download default GGUF model.\n\n{exc}",
+                )
+                return
+            finally:
+                QApplication.restoreOverrideCursor()
+            self.gguf_path_edit.setText(str(model_path))
+            if downloaded:
+                QMessageBox.information(
+                    self,
+                    "GGUF Download Complete",
+                    f"Downloaded default GGUF model to:\n{model_path}",
+                )
+
         self.settings.save()
         self.accept()

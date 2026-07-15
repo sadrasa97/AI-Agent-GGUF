@@ -27,6 +27,12 @@ VALID_BACKENDS = ("gguf", "openrouter", "nvidia")
 class Settings:
     # ---- local GGUF backend ----
     model_path: str = ""
+    auto_download_default_gguf: bool = True
+    default_gguf_url: str = (
+        "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/"
+        "Qwen3.5-2B-UD-Q4_K_XL.gguf?download=true"
+    )
+    default_gguf_filename: str = "Qwen3.5-2B-UD-Q4_K_XL.gguf"
     context_size: int = 4096
     threads: Optional[int] = None
     gpu_layers: int = 0

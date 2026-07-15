@@ -12,6 +12,7 @@ Layout mirrors GitHub Copilot Chat:
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -25,9 +26,12 @@ from PySide6.QtWidgets import (
 
 from config.settings import Settings
 from agent.providers import create_provider, ProviderError
+from tools.code_tools import list_workspace_files, read_text_file
 
 # Attached files larger than this are truncated when inlined into the prompt.
 MAX_ATTACHMENT_CHARS = 20_000
+MAX_TOOL_OUTPUT_CHARS = 12_000
+MAX_REGEX_MATCHES = 120
 
 
 class GenerationWorker(QObject):
@@ -297,6 +301,11 @@ class ChatPanel(QWidget):
         self.input_box = ChatInputBox()
         self.input_box.setFixedHeight(64)
         self.input_box.setPlaceholderText("Ask the model to write/explain/fix code…  (Enter to send, Shift+Enter new line)")
+        self.input_box.setToolTip(
+            "Optional tool directives in your message:\n"
+            "  /regex <pattern>  -> search workspace with Python regex\n"
+            "  /ps <command>     -> run PowerShell command in workspace"
+        )
         self.input_box.setStyleSheet(
             "QPlainTextEdit { background:transparent; color:#eee; border:none; padding:2px; }"
         )
@@ -479,6 +488,108 @@ class ChatPanel(QWidget):
             blocks.append(f"### Attached file: {path.name}\n```\n{content}\n```")
         return "\n\n".join(blocks) + "\n\n"
 
+    @staticmethod
+    def _truncate_text(text: str, max_chars: int = MAX_TOOL_OUTPUT_CHARS) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "\n...[truncated]..."
+
+    @staticmethod
+    def _parse_tool_directives(user_text: str) -> tuple[str, list[str], list[str]]:
+        cleaned_lines: list[str] = []
+        regex_queries: list[str] = []
+        ps_commands: list[str] = []
+        for line in user_text.splitlines():
+            stripped = line.strip()
+            lowered = stripped.lower()
+            if lowered.startswith("/regex "):
+                query = stripped[7:].strip()
+                if query:
+                    regex_queries.append(query)
+                continue
+            if lowered.startswith("/ps "):
+                cmd = stripped[4:].strip()
+                if cmd:
+                    ps_commands.append(cmd)
+                continue
+            cleaned_lines.append(line)
+        return "\n".join(cleaned_lines).strip(), regex_queries, ps_commands
+
+    def _run_workspace_regex(self, pattern: str) -> str:
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            return f"Pattern compile error: {exc}"
+
+        workspace = self.settings.workspace_path
+        matches: list[str] = []
+        files = list_workspace_files(workspace, max_depth=10, max_files=4000)
+        for path in files:
+            try:
+                content = read_text_file(path, max_bytes=500_000)
+            except Exception:
+                continue
+            for line_no, line in enumerate(content.splitlines(), start=1):
+                if not regex.search(line):
+                    continue
+                rel = path.relative_to(workspace).as_posix()
+                snippet = line.strip()
+                matches.append(f"{rel}:{line_no}: {snippet}")
+                if len(matches) >= MAX_REGEX_MATCHES:
+                    return "\n".join(matches) + "\n... (match limit reached)"
+        if not matches:
+            return "No matches found."
+        return "\n".join(matches)
+
+    def _run_powershell(self, command: str) -> str:
+        try:
+            proc = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ],
+                cwd=str(self.settings.workspace_path),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return f"PowerShell execution failed: {exc}"
+
+        stdout = proc.stdout.strip()
+        stderr = proc.stderr.strip()
+        parts = [f"ExitCode: {proc.returncode}"]
+        if stdout:
+            parts.append("STDOUT:\n" + stdout)
+        if stderr:
+            parts.append("STDERR:\n" + stderr)
+        return self._truncate_text("\n\n".join(parts))
+
+    def _build_tool_context(self, user_text: str) -> tuple[str, str]:
+        cleaned_text, regex_queries, ps_commands = self._parse_tool_directives(user_text)
+        if not regex_queries and not ps_commands:
+            return user_text, ""
+
+        sections: list[str] = [
+            "Local tool outputs (executed before answering):",
+            f"Workspace: {self.settings.workspace_path}",
+        ]
+
+        for query in regex_queries:
+            sections.append(f"\n[Regex Search] pattern={query}")
+            sections.append(self._run_workspace_regex(query))
+
+        for command in ps_commands:
+            sections.append(f"\n[PowerShell] command={command}")
+            sections.append(self._run_powershell(command))
+
+        return (cleaned_text or user_text), "\n".join(sections)
+
     def send_message(self):
         if self._thread is not None:
             return  # generation already in progress
@@ -487,7 +598,10 @@ class ChatPanel(QWidget):
         if not text and not attachment_names:
             return
         attachment_context = self._build_attachment_context()
-        full_message = f"{attachment_context}{text}" if attachment_context else text
+        processed_text, tool_context = self._build_tool_context(text)
+        full_message = f"{attachment_context}{processed_text}" if attachment_context else processed_text
+        if tool_context:
+            full_message = f"{tool_context}\n\nUser request:\n{full_message}"
 
         if self.mode == "Plan":
             full_message = (

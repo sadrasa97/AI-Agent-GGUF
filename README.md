@@ -69,20 +69,17 @@ pip install -r requirements.txt
 
 # Automatic Model Download
 
-If the specified model file does not exist locally, the application automatically downloads a supported Qwen GGUF model from Hugging Face.
+If the specified model file does not exist locally, the application can automatically download a default Qwen GGUF model from Hugging Face.
 
 Repository:
 
-https://huggingface.co/unsloth/Qwen3.5-2B-MTP-GGUF
+https://huggingface.co/unsloth/Qwen3.5-2B-GGUF
 
 Supported Downloads:
 
 ```text
-Q8 Model:
-https://huggingface.co/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-UD-Q8_K_XL.gguf?download=true
-
-Q4 Model:
-https://huggingface.co/unsloth/Qwen3.5-2B-MTP-GGUF/resolve/main/Qwen3.5-2B-UD-Q4_K_XL.gguf?download=true
+Default Q4 Model:
+https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-UD-Q4_K_XL.gguf?download=true
 ```
 
 Models are stored automatically inside:
@@ -102,6 +99,10 @@ python main.py
 ```
 
 If no model exists inside `workspace/models/`, the application automatically downloads a default GGUF model.
+
+You can also enable this behavior from the Model Settings dialog using:
+
+- `Auto-download default GGUF model when GGUF backend is selected`
 
 ---
 
@@ -157,6 +158,8 @@ python main.py [options]
 | `/multi`       | Multi-line input mode            |
 | `/tree`        | Show workspace directory tree    |
 | `/open <path>` | Load a file into model context   |
+| `/regex <pattern>` | Run workspace regex search and include exact file:line hits in model context |
+| `/ps <command>` | Run a PowerShell command in workspace and include output in model context |
 | `/workspace`   | Open workspace in VS Code        |
 | `/exit`        | Exit the application             |
 

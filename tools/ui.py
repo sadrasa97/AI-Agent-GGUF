@@ -87,6 +87,8 @@ def print_help():
         ("/multi",        "Enter multi-line input mode (end with ;;)"),
         ("/tree",         "Show workspace file tree"),
         ("/open <path>",  "Open a workspace file and add it to context"),
+        ("/regex <pattern>", "Search project files with a regex"),
+        ("/ps <command>", "Run a PowerShell command in the workspace"),
         ("ask about main.py", "Files mentioned in your prompt are loaded automatically"),
         ("/workspace",    "Open workspace folder in VS Code"),
         ("/exit",         "Quit the agent"),

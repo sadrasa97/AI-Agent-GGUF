@@ -12,14 +12,14 @@ from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtGui import QTextCursor, QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit,
-    QPushButton, QLabel, QComboBox, QSizePolicy, QFileDialog, QMessageBox,
+    QPushButton, QLabel, QComboBox, QFileDialog,
 )
-
-# Attached files larger than this are truncated when inlined into the prompt.
-MAX_ATTACHMENT_CHARS = 20_000
 
 from config.settings import Settings
 from agent.providers import create_provider, ProviderError
+
+# Attached files larger than this are truncated when inlined into the prompt.
+MAX_ATTACHMENT_CHARS = 20_000
 
 
 class GenerationWorker(QObject):
@@ -56,6 +56,21 @@ class GenerationWorker(QObject):
         finally:
             provider.close()
             self.finished.emit()
+
+
+class ChatInputBox(QPlainTextEdit):
+    submitRequested = Signal()
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if event.modifiers() & Qt.ShiftModifier:
+                super().keyPressEvent(event)
+                return
+            event.accept()
+            self.submitRequested.emit()
+            return
+        super().keyPressEvent(event)
 
 
 class ChatPanel(QWidget):
@@ -126,12 +141,13 @@ class ChatPanel(QWidget):
         composer_layout.setContentsMargins(10, 8, 10, 8)
         composer_layout.setSpacing(6)
 
-        self.input_box = QPlainTextEdit()
+        self.input_box = ChatInputBox()
         self.input_box.setFixedHeight(64)
-        self.input_box.setPlaceholderText("Ask the model to write/explain/fix code…  (Ctrl+Enter to send)")
+        self.input_box.setPlaceholderText("Ask the model to write/explain/fix code…  (Enter to send, Shift+Enter new line)")
         self.input_box.setStyleSheet(
             "QPlainTextEdit { background:transparent; color:#eee; border:none; padding:2px; }"
         )
+        self.input_box.submitRequested.connect(self.send_message)
         composer_layout.addWidget(self.input_box)
 
         composer_btn_row = QHBoxLayout()
@@ -141,6 +157,12 @@ class ChatPanel(QWidget):
         self.attach_btn.setToolTip("Attach a file to share with the model")
         self.attach_btn.clicked.connect(self.attach_file)
         composer_btn_row.addWidget(self.attach_btn)
+
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setToolTip("Clear conversation")
+        self.clear_btn.clicked.connect(self.clear_history)
+        composer_btn_row.addWidget(self.clear_btn)
+
         composer_btn_row.addStretch()
 
         self.stop_btn = QPushButton("Stop")
@@ -156,6 +178,11 @@ class ChatPanel(QWidget):
             "QPushButton { background:#232427; color:#c9c9cc; padding:6px 12px; border:1px solid #38393e; "
             "border-radius:10px; font-size:12px; }"
             "QPushButton:hover { background:#2f3034; }"
+        )
+        self.clear_btn.setStyleSheet(
+            "QPushButton { background:#232427; color:#8a8b90; padding:4px 8px; border:1px solid #38393e; "
+            "border-radius:9px; font-size:11px; }"
+            "QPushButton:hover { background:#2f3034; color:#c9c9cc; }"
         )
         self.stop_btn.setStyleSheet(
             "QPushButton { background:#2b2d31; color:#c9c9cc; padding:6px 14px; border:1px solid #38393e; "
@@ -174,14 +201,6 @@ class ChatPanel(QWidget):
         outer_composer_row.setContentsMargins(12, 0, 12, 10)
         outer_composer_row.addWidget(composer)
         layout.addLayout(outer_composer_row)
-
-        self.clear_btn = QPushButton("Clear conversation")
-        self.clear_btn.clicked.connect(self.clear_history)
-        self.clear_btn.setStyleSheet(
-            "QPushButton { background:transparent; color:#8a8b90; padding:4px; border:none; font-size:11px; }"
-            "QPushButton:hover { color:#c9c9cc; }"
-        )
-        layout.addWidget(self.clear_btn)
 
     # ------------------------------------------------------------------
     def _on_backend_changed(self, text: str):
@@ -275,7 +294,11 @@ class ChatPanel(QWidget):
         self._render_attachment_chips()
 
         self._append_transcript(f"<p><b style='color:#4fc1ff'>You:</b> {display_text}</p>")
-        self._append_transcript("<p><b style='color:#b5cea8'>Assistant:</b> </p>")
+        self._append_transcript("<p><b style='color:#b5cea8'>Assistant:</b></p>")
+        cursor = self.transcript.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertBlock()
+        self.transcript.setTextCursor(cursor)
 
         self._response_buffer = ""
         workspace_context = self.get_workspace_context() if self.get_workspace_context else None
@@ -312,7 +335,7 @@ class ChatPanel(QWidget):
             self.history.append({"role": "assistant", "content": self._response_buffer})
             for lang, code in self._extract_code_blocks(self._response_buffer):
                 self.codeBlockReady.emit(lang, code)
-        self._append_transcript("<br/>")
+        self._append_transcript("<br/><br/>")
 
         if self._thread:
             self._thread.quit()

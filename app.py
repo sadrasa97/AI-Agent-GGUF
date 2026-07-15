@@ -157,6 +157,15 @@ def build_settings(args: argparse.Namespace) -> Settings:
     if args.temp is not None:
         settings.temperature = args.temp
 
+    # Auto-pick a local GGUF model if backend is gguf and no explicit path exists.
+    if settings.backend == "gguf" and not settings.model_path:
+        workspace_candidate = Path(settings.workspace).expanduser().resolve()
+        model_dir = workspace_candidate / "workspace" / "models"
+        if model_dir.exists() and model_dir.is_dir():
+            models = sorted(model_dir.glob("*.gguf"))
+            if models:
+                settings.model_path = str(models[0].resolve())
+
     Path(settings.workspace).mkdir(parents=True, exist_ok=True)
     return settings
 

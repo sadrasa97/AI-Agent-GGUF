@@ -1,6 +1,8 @@
 """Bottom integrated terminal panel with selectable shell (PowerShell / CMD)."""
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -16,6 +18,13 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QLineEdit,
 )
+
+from config.settings import Settings
+from agent.providers import create_provider, ProviderError
+from tools.code_tools import build_workspace_context
+
+
+AI_PREFIX = "/ai "
 
 
 class TerminalOutputEdit(QPlainTextEdit):
@@ -76,9 +85,10 @@ class OutputPanel(QWidget):
         "Command Prompt": ("cmd.exe", ["/Q"]),
     }
 
-    def __init__(self, workspace_path: Path, parent=None):
+    def __init__(self, workspace_path: Path, settings: Settings, parent=None):
         super().__init__(parent)
         self.workspace_path = Path(workspace_path).resolve()
+        self.settings = settings
         self._intentional_restart = False
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self._on_stdout)
@@ -137,9 +147,105 @@ class OutputPanel(QWidget):
     def execute_command(self, command: str):
         if not command.strip():
             return
+        if command.strip().lower().startswith(AI_PREFIX):
+            self._handle_ai_task(command)
+            return
         if self.process.state() != QProcess.Running:
             self._restart_terminal(self.shell_combo.currentText())
         self.process.write((command + "\n").encode("utf-8"))
+
+    def _handle_ai_task(self, command: str):
+        task_prompt = command.strip()[len(AI_PREFIX):].strip()
+        if not task_prompt:
+            self.output.appendPlainText("[ai] usage: /ai <task description>")
+            return
+
+        if self.settings.backend == "gguf" and not self.settings.model_path:
+            self.output.appendPlainText("[ai] GGUF model path is empty. Set model in Settings first.")
+            return
+
+        self.output.appendPlainText(f"[ai] task: {task_prompt}")
+        self.output.appendPlainText("[ai] generating code...")
+
+        wrapped_prompt = (
+            "Write a complete Python solution for this task. "
+            "Return exactly one runnable Python code block. "
+            "Do not include any text outside the code block.\n\n"
+            f"Task: {task_prompt}"
+        )
+        history = [{"role": "user", "content": wrapped_prompt}]
+        workspace_context = build_workspace_context(
+            self.workspace_path,
+            user_text=task_prompt,
+            max_files=80,
+            max_bytes=6000,
+            max_depth=4,
+        )
+
+        try:
+            provider = create_provider(self.settings)
+        except ProviderError as exc:
+            self.output.appendPlainText(f"[ai] error: {exc}")
+            return
+
+        response = ""
+        try:
+            for tok in provider.stream(history, workspace_context=workspace_context):
+                response += tok
+        except ProviderError as exc:
+            self.output.appendPlainText(f"[ai] provider error: {exc}")
+            provider.close()
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.output.appendPlainText(f"[ai] unexpected error: {exc}")
+            provider.close()
+            return
+        finally:
+            provider.close()
+
+        code = self._extract_python_code(response)
+        if not code:
+            self.output.appendPlainText("[ai] no python code block was generated.")
+            if response.strip():
+                self.output.appendPlainText("[ai] raw response:")
+                self.output.appendPlainText(response.strip())
+            return
+
+        path = self._next_task_file()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(code, encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self.output.appendPlainText(f"[ai] save error: {exc}")
+            return
+
+        self.output.appendPlainText(f"[ai] saved: {path}")
+        self.output.appendPlainText(f"[ai] running: {path.name}")
+        self.execute_file(path)
+
+    @staticmethod
+    def _extract_python_code(text: str) -> str:
+        pattern = re.compile(r"```(?P<lang>[a-zA-Z0-9+#_-]*)\n(?P<code>.*?)```", re.DOTALL)
+        blocks = [(m.group("lang").strip().lower(), m.group("code")) for m in pattern.finditer(text)]
+        for lang, code in blocks:
+            if lang in {"python", "py"}:
+                return code.strip()
+        if blocks:
+            return blocks[0][1].strip()
+        return ""
+
+    def _next_task_file(self) -> Path:
+        tasks_dir = self.workspace_path / "tasks"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = tasks_dir / f"task_{timestamp}.py"
+        if not base.exists():
+            return base
+        idx = 1
+        while True:
+            candidate = tasks_dir / f"task_{timestamp}_{idx}.py"
+            if not candidate.exists():
+                return candidate
+            idx += 1
 
     def execute_file(self, path: Path) -> bool:
         ext = path.suffix.lower()

@@ -131,7 +131,7 @@ class MainWindow(QMainWindow):
         self.resizeDocks([chat_dock], [420], Qt.Horizontal)
 
         # ---- output dock (bottom) ----
-        self.output_panel = OutputPanel(self.settings.workspace_path)
+        self.output_panel = OutputPanel(self.settings.workspace_path, self.settings)
         output_dock = QDockWidget("OUTPUT", self)
         output_dock.setWidget(self.output_panel)
         output_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)

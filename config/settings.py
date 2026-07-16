@@ -1,112 +1,184 @@
-"""Global settings dataclass passed through the whole agent.
-
-Extended to support three interchangeable generation backends:
-  - "gguf"        : local llama-cpp-python model (offline)
-  - "openrouter"  : OpenRouter hosted models (https://openrouter.ai)
-  - "nvidia"      : NVIDIA NIM / build.nvidia.com hosted models
-
-Only one backend is "active" at a time (self.backend), but the
-credentials/config for all three are kept around so the UI can let the
-user flip between them without re-entering keys.
 """
-from __future__ import annotations
-
+Configuration settings for GGUF Code Agent.
+"""
 import json
-import os
-from dataclasses import dataclass, field, asdict
+import sys
 from pathlib import Path
-from typing import Optional
 
+# Valid backend options
+VALID_BACKENDS = ["gguf", "openrouter", "nvidia"]
+
+# Valid UI themes
+VALID_UI_THEMES = ["dark", "light"]
+
+# Configuration directory
 CONFIG_DIR = Path.home() / ".gguf_code_agent"
-CONFIG_FILE = CONFIG_DIR / "config.json"
-
-VALID_BACKENDS = ("gguf", "openrouter", "nvidia")
 
 
-@dataclass
 class Settings:
-    # ---- local GGUF backend ----
-    model_path: str = ""
-    auto_download_default_gguf: bool = True
-    default_gguf_url: str = (
-        "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/"
-        "Qwen3.5-2B-UD-Q4_K_XL.gguf?download=true"
-    )
-    default_gguf_filename: str = "Qwen3.5-2B-UD-Q4_K_XL.gguf"
-    context_size: int = 4096
-    threads: Optional[int] = None
-    gpu_layers: int = 0
-    verbose: bool = False
+    """Application configuration settings."""
 
-    # ---- shared generation params ----
-    temperature: float = 0.2
-    max_tokens: int = 2048
-    top_p: float = 0.95
-    repeat_penalty: float = 1.1
+    # Default values
+    DEFAULT_MODEL = "qwen3.5-2B-UD-Q4_K_XL.gguf"
+    OUTPUT_FORMAT = "text"
+    UI_THEME = "dark"
+    MAX_OUTPUT_LENGTH = 2048
 
-    # ---- workspace ----
-    workspace: str = "./workspace"
+    def __init__(self):
+        # Backend settings
+        self.backend = "gguf"
+        self.model_path = ""
+        self.context_size = 4096
+        self.threads = None
+        self.gpu_layers = -1
+        self.temperature = 0.7
+        self.top_p = 0.9
+        self.repeat_penalty = 1.1
+        self.max_tokens = 2048
+        self.verbose = False
 
-    # ---- active backend selector ----
-    backend: str = "gguf"  # one of VALID_BACKENDS
+        # OpenRouter settings
+        self.openrouter_api_key = ""
+        self.openrouter_model = ""
+        self.openrouter_base_url = "https://openrouter.ai/api/v1"
 
-    # ---- OpenRouter ----
-    openrouter_api_key: str = ""
-    openrouter_model: str = "qwen/qwen-2.5-coder-32b-instruct"
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+        # NVIDIA settings
+        self.nvidia_api_key = ""
+        self.nvidia_model = ""
+        self.nvidia_base_url = "https://integrate.api.nvidia.com/v1"
 
-    # ---- NVIDIA NIM ----
-    nvidia_api_key: str = ""
-    nvidia_model: str = "meta/llama-3.1-70b-instruct"
-    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+        # Workspace
+        self.workspace = str(Path.cwd())
+
+        # UI preferences
+        self.ui_theme = self.UI_THEME
+        self.max_output_length = self.MAX_OUTPUT_LENGTH
+        self.show_code_editor = True
+
+        # GGUF auto-download
+        self.auto_download_default_gguf = False
+
+        # Voice / ASR settings
+        self.asr_backend = "local"                 # "local" | "api"
+        self.qwen_voice_model_path = ""             # local dir for Qwen3-ASR
+        self.asr_model_path = ""                    # fallback (e.g. whisper) model id/path
+        self.asr_language = "Auto"
+        self.asr_sample_rate = 16000
+        self.asr_api_url = ""
+        self.asr_api_key = ""
+
+        # Model config (legacy)
+        self.model_config = {
+            'model': self.DEFAULT_MODEL,
+            'output_format': self.OUTPUT_FORMAT,
+            'ui_theme': self.UI_THEME,
+            'max_output_length': self.MAX_OUTPUT_LENGTH
+        }
+
+    # ------------------------------------------------------------------
+    # Derived / convenience properties
+    # ------------------------------------------------------------------
 
     @property
     def workspace_path(self) -> Path:
-        p = Path(self.workspace).expanduser().resolve()
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        """Workspace directory as a Path object (used throughout the UI/agent code)."""
+        return Path(self.workspace).expanduser()
 
     @property
     def model_name(self) -> str:
+        """Human-friendly label for whichever backend/model is currently active."""
         if self.backend == "gguf":
-            return Path(self.model_path).stem if self.model_path else "(no model)"
+            if self.model_path:
+                return Path(self.model_path).name
+            return self.DEFAULT_MODEL
         if self.backend == "openrouter":
-            return self.openrouter_model
+            return self.openrouter_model or "openrouter (no model set)"
         if self.backend == "nvidia":
-            return self.nvidia_model
-        return "(unknown)"
+            return self.nvidia_model or "nvidia (no model set)"
+        return "unknown"
 
     # ------------------------------------------------------------------
-    # Persistence — so API keys / last-used model survive UI restarts
+    # Validation
     # ------------------------------------------------------------------
-    def save(self, path: Path = CONFIG_FILE) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = asdict(self)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-    @classmethod
-    def load(cls, path: Path = CONFIG_FILE) -> "Settings":
-        if not path.exists():
-            return cls()
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            valid_keys = {f for f in cls.__dataclass_fields__}
-            data = {k: v for k, v in data.items() if k in valid_keys}
-            return cls(**data)
-        except Exception:
-            return cls()
+    def validate_backend(self) -> str | None:
+        """Return an error string if the current backend is misconfigured, else None."""
+        if self.backend not in VALID_BACKENDS:
+            return f"Unknown backend: {self.backend}"
 
-    def validate_backend(self) -> Optional[str]:
-        """Return an error string if the active backend is misconfigured, else None."""
         if self.backend == "gguf":
-            if not self.model_path or not os.path.isfile(self.model_path):
+            if not self.model_path:
+                return "No GGUF model path is set. Choose a model in Model Settings."
+            if not Path(self.model_path).expanduser().is_file():
                 return f"GGUF model file not found: {self.model_path}"
+
         elif self.backend == "openrouter":
             if not self.openrouter_api_key:
                 return "OpenRouter API key is not set."
+            if not self.openrouter_model:
+                return "OpenRouter model is not set."
+
         elif self.backend == "nvidia":
             if not self.nvidia_api_key:
-                return "NVIDIA API key is not set."
-        else:
-            return f"Unknown backend: {self.backend}"
+                return "NVIDIA NIM API key is not set."
+            if not self.nvidia_model:
+                return "NVIDIA NIM model is not set."
+
         return None
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def load(cls) -> "Settings":
+        """Load settings from config file."""
+        settings = cls()
+        config_file = CONFIG_DIR / "config.json"
+
+        if config_file.exists():
+            try:
+                data = json.loads(config_file.read_text(encoding="utf-8"))
+                for key, value in data.items():
+                    if hasattr(settings, key):
+                        setattr(settings, key, value)
+            except Exception:
+                pass
+
+        return settings
+
+    def save(self) -> None:
+        """Save settings to config file."""
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        config_file = CONFIG_DIR / "config.json"
+
+        # Convert settings to dict, excluding methods, properties, and private attributes.
+        # Properties (workspace_path, model_name) are intentionally excluded since they're
+        # derived, not stored, and validate_backend()/save() are methods, not data.
+        skip = {"workspace_path", "model_name"}
+        data = {}
+        cls_ = type(self)
+        for key in dir(self):
+            if key.startswith('_') or key in skip:
+                continue
+            # Skip properties/methods defined on the class (only persist instance data)
+            class_attr = getattr(cls_, key, None)
+            if isinstance(class_attr, property):
+                continue
+            value = getattr(self, key)
+            if callable(value):
+                continue
+            # Only save serializable types
+            if isinstance(value, (str, int, float, bool, type(None))):
+                data[key] = value
+
+        config_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def normalize_ui_preferences(self) -> None:
+        """Ensure UI preferences are valid."""
+        if self.ui_theme not in VALID_UI_THEMES:
+            self.ui_theme = "dark"
+
+
+# Initialize settings instance
+settings = Settings()

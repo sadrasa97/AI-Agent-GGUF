@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
     QStyle,
 )
 
-from config.settings import Settings
+from config.settings import Settings, VALID_UI_THEMES
 from tools.code_tools import (
     build_workspace_context, list_workspace_files, save_code, CodeBlock,
     resolve_workspace_path,
@@ -55,71 +55,118 @@ QMenu { background-color: #202124; color: #cccccc; border: 1px solid #303136; bo
 QMenu::item { padding: 5px 12px; border-radius: 6px; }
 QMenu::item:selected { background-color: #2b2d31; }
 QToolBar#MainToolbar {
-    background-color: #323233;
+    background-color: #3c3c3c;
     border: none;
-    border-bottom: 1px solid #1e1e1e;
+    border-bottom: 1px solid #2a2a2a;
     spacing: 0px;
-    padding: 2px 4px;
+    padding: 1px 6px;
 }
 QToolBar#MainToolbar QToolButton {
     background: transparent;
     color: #cccccc;
     border: 1px solid transparent;
-    border-radius: 5px;
-    padding: 3px;
-    margin: 1px;
+    border-radius: 0px;
+    padding: 4px;
+    margin: 0px;
+    min-width: 26px;
+    min-height: 24px;
 }
 QToolBar#MainToolbar QToolButton:hover {
-    background-color: #3f4043;
+    background-color: #505050;
 }
 QToolBar#MainToolbar QToolButton:pressed {
-    background-color: #4a4a4d;
+    background-color: #444444;
 }
 QToolBar#MainToolbar QToolButton:checked {
-    background-color: #4a4a4d;
-    border: 1px solid #5a5a5d;
+    background-color: #4b4b4b;
+    border: 1px solid #5c5c5c;
 }
 QToolBar#MainToolbar QToolButton:disabled {
     color: #5a5a5e;
 }
 QToolBar#MainToolbar::separator {
-    background-color: #3f4043;
+    background-color: #5a5a5a;
     width: 1px;
     margin: 4px 6px;
 }
-QTabWidget::pane { border: none; background: #1a1b1e; top: -1px; }
+QTabWidget::pane { border: none; background: #1e1e1e; top: -1px; }
 QTabBar { qproperty-drawBase: 0; }
-QTabBar::tab {
-    background: #202124;
-    color: #8a8b90;
-    padding: 8px 18px;
-    margin-right: 4px;
-    margin-top: 4px;
-    border: 1px solid transparent;
-    border-top-left-radius: 10px;
-    border-top-right-radius: 10px;
-    font-size: 12px;
-}
-QTabBar::tab:selected {
-    background: #26272b;
-    color: #ffffff;
-    border: 1px solid #38393e;
-    border-bottom: none;
-    border-top: 2px solid #6c8cff;
-    padding-top: 7px;
-}
-QTabBar::tab:!selected {
-    margin-top: 7px;
-}
-QTabBar::tab:hover:!selected { background:#2b2d31; color:#c9c9cc; }
-QTabBar::close-button { image: none; subcontrol-position: right; }
-QTabBar::tab:hover QTabBar::close-button { background: #3a2c2c; border-radius: 4px; }
 QDockWidget { titlebar-close-icon: none; border: none; }
 QDockWidget::title { background:#202124; color:#a0a1a6; padding:8px 10px; font-weight:600; font-size:11px; letter-spacing:1px; }
-QScrollBar:vertical { background:#1a1b1e; width:10px; margin:2px; }
-QScrollBar::handle:vertical { background:#3a3b40; border-radius:5px; min-height:20px; }
-QScrollBar::handle:vertical:hover { background:#4a4b52; }
+QScrollBar:vertical {
+    background: transparent;
+    width: 11px;
+    margin: 3px 2px 3px 0;
+}
+QScrollBar::handle:vertical {
+    background: rgba(255, 255, 255, 0.13);
+    border-radius: 5px;
+    min-height: 36px;
+}
+QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.24); }
+QScrollBar::handle:vertical:pressed { background: rgba(255, 255, 255, 0.34); }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; width: 0; background: none; border: none; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+QScrollBar:horizontal {
+    background: transparent;
+    height: 11px;
+    margin: 0 3px 2px 3px;
+}
+QScrollBar::handle:horizontal {
+    background: rgba(255, 255, 255, 0.13);
+    border-radius: 5px;
+    min-width: 36px;
+}
+QScrollBar::handle:horizontal:hover { background: rgba(255, 255, 255, 0.24); }
+QScrollBar::handle:horizontal:pressed { background: rgba(255, 255, 255, 0.34); }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { height: 0; width: 0; background: none; border: none; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+QAbstractScrollArea::corner { background: transparent; border: none; }
 QSplitter::handle { background:#1a1b1e; width:2px; }
+QPushButton { border-radius: 8px; }
+QLineEdit, QPlainTextEdit, QTextEdit { border-radius: 8px; }
+"""
+
+LIGHT_STYLESHEET = """
+QMainWindow, QWidget { background-color: #f6f8fb; color: #1f1f1f; font-family: 'Segoe UI', 'Inter', sans-serif; }
+QMenuBar { background-color: #ebedf0; color: #222222; padding: 2px; }
+QMenuBar::item { padding: 4px 10px; border-radius: 6px; }
+QMenuBar::item:selected { background-color: #dfe6f2; }
+QMenu { background-color: #ffffff; color: #222222; border: 1px solid #d2d7df; border-radius: 8px; padding: 4px; }
+QMenu::item { padding: 5px 12px; border-radius: 6px; }
+QMenu::item:selected { background-color: #e9f1ff; }
+QDockWidget { titlebar-close-icon: none; border: none; }
+QDockWidget::title { background:#ebedf0; color:#555b66; padding:8px 10px; font-weight:600; font-size:11px; letter-spacing:1px; }
+QScrollBar:vertical {
+    background: transparent;
+    width: 11px;
+    margin: 3px 2px 3px 0;
+}
+QScrollBar::handle:vertical {
+    background: rgba(0, 0, 0, 0.14);
+    border-radius: 5px;
+    min-height: 36px;
+}
+QScrollBar::handle:vertical:hover { background: rgba(0, 0, 0, 0.24); }
+QScrollBar::handle:vertical:pressed { background: rgba(0, 0, 0, 0.34); }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; width: 0; background: none; border: none; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+QScrollBar:horizontal {
+    background: transparent;
+    height: 11px;
+    margin: 0 3px 2px 3px;
+}
+QScrollBar::handle:horizontal {
+    background: rgba(0, 0, 0, 0.14);
+    border-radius: 5px;
+    min-width: 36px;
+}
+QScrollBar::handle:horizontal:hover { background: rgba(0, 0, 0, 0.24); }
+QScrollBar::handle:horizontal:pressed { background: rgba(0, 0, 0, 0.34); }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { height: 0; width: 0; background: none; border: none; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }
+QAbstractScrollArea::corner { background: transparent; border: none; }
+QSplitter::handle { background:#d7dce4; width:2px; }
 QPushButton { border-radius: 8px; }
 QLineEdit, QPlainTextEdit, QTextEdit { border-radius: 8px; }
 """
@@ -130,6 +177,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self._last_generated_block: CodeBlock | None = None
+        if self.settings.ui_theme not in VALID_UI_THEMES:
+            self.settings.ui_theme = "dark"
         self.setWindowTitle("GGUF Code Agent — IDE")
         self.resize(1440, 900)
         self.setStyleSheet(DARK_STYLESHEET)
@@ -151,6 +200,14 @@ class MainWindow(QMainWindow):
         explorer_dock.setTitleBarWidget(QWidget())
         self.addDockWidget(Qt.LeftDockWidgetArea, explorer_dock)
         self.explorer_dock = explorer_dock
+
+        # Give the side docks (Explorer / Chat) ownership of the bottom corners so the
+        # bottom Output/Terminal dock only spans the center, and Chat reaches full height
+        # all the way down the right edge of the window.
+        self.setCorner(Qt.TopLeftCorner, Qt.LeftDockWidgetArea)
+        self.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
+        self.setCorner(Qt.TopRightCorner, Qt.RightDockWidgetArea)
+        self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
 
         # ---- chat dock (right) ----
         self.chat_panel = ChatPanel(self.settings, self._workspace_context_for_chat)
@@ -176,17 +233,21 @@ class MainWindow(QMainWindow):
         self.output_dock = output_dock
         self.resizeDocks([output_dock], [200], Qt.Vertical)
 
-        # Keep a single top bar like VS Code command strip.
-        self.menuBar().hide()
-        self._build_toolbar()
+        # Use a VS Code-like top menu bar (File/Edit/View/Go/Run/Terminal/Help).
+        self._build_menus()
+        self._set_code_editor_visible(self.settings.show_code_editor, save=False)
+        self._apply_theme(self.settings.ui_theme, save=False)
 
         self.editor_tabs.activeFileChanged.connect(self._on_active_file_changed)
+        self.editor_tabs.currentChanged.connect(lambda _i: self._sync_undo_redo_state())
+        self._sync_undo_redo_state()
 
     # ──────────────────────────────────────────────────────────────
     # Menus
     # ──────────────────────────────────────────────────────────────
     def _build_menus(self):
         menubar = self.menuBar()
+        menubar.clear()
 
         file_menu = menubar.addMenu("&File")
         new_file_action = QAction("New File In Project…", self)
@@ -216,11 +277,70 @@ class MainWindow(QMainWindow):
         ):
             file_menu.addAction(action)
 
+        edit_menu = menubar.addMenu("&Edit")
+        undo_action = QAction("Undo", self)
+        undo_action.setShortcut(QKeySequence.Undo)
+        undo_action.triggered.connect(lambda: self._active_editor_call("undo"))
+        edit_menu.addAction(undo_action)
+        self.undo_action = undo_action
+
+        redo_action = QAction("Redo", self)
+        redo_action.setShortcut(QKeySequence.Redo)
+        redo_action.triggered.connect(lambda: self._active_editor_call("redo"))
+        edit_menu.addAction(redo_action)
+        self.redo_action = redo_action
+
+        view_menu = menubar.addMenu("&View")
+        toggle_explorer_action = QAction("Toggle Explorer", self)
+        toggle_explorer_action.setCheckable(True)
+        toggle_explorer_action.setChecked(True)
+        toggle_explorer_action.triggered.connect(
+            lambda checked: self.explorer_dock.setVisible(checked)
+        )
+        self.explorer_dock.visibilityChanged.connect(toggle_explorer_action.setChecked)
+        view_menu.addAction(toggle_explorer_action)
+
+        toggle_chat_action = QAction("Toggle Chat", self)
+        toggle_chat_action.setCheckable(True)
+        toggle_chat_action.setChecked(True)
+        toggle_chat_action.triggered.connect(lambda checked: self.chat_dock.setVisible(checked))
+        self.chat_dock.visibilityChanged.connect(toggle_chat_action.setChecked)
+        view_menu.addAction(toggle_chat_action)
+
+        toggle_output_action = QAction("Toggle Output", self)
+        toggle_output_action.setCheckable(True)
+        toggle_output_action.setChecked(True)
+        toggle_output_action.triggered.connect(lambda checked: self.output_dock.setVisible(checked))
+        self.output_dock.visibilityChanged.connect(toggle_output_action.setChecked)
+        view_menu.addAction(toggle_output_action)
+
+        self.toggle_editor_action = QAction("Toggle Code Editor", self)
+        self.toggle_editor_action.setCheckable(True)
+        self.toggle_editor_action.setChecked(self.settings.show_code_editor)
+        self.toggle_editor_action.triggered.connect(self._set_code_editor_visible)
+        view_menu.addAction(self.toggle_editor_action)
+
+        themes_menu = view_menu.addMenu("Theme")
+        self.theme_dark_action = QAction("Dark", self)
+        self.theme_dark_action.setCheckable(True)
+        self.theme_dark_action.triggered.connect(lambda: self._apply_theme("dark"))
+        themes_menu.addAction(self.theme_dark_action)
+
+        self.theme_light_action = QAction("Light", self)
+        self.theme_light_action.setCheckable(True)
+        self.theme_light_action.triggered.connect(lambda: self._apply_theme("light"))
+        themes_menu.addAction(self.theme_light_action)
+
+        menubar.addMenu("&Go")
+
         run_menu = menubar.addMenu("&Run")
         run_action = QAction("Run Active File", self)
         run_action.setShortcut("F5")
         run_action.triggered.connect(self._run_active_file)
         run_menu.addAction(run_action)
+
+        terminal_menu = menubar.addMenu("&Terminal")
+        terminal_menu.addAction(toggle_output_action)
 
         settings_menu = menubar.addMenu("&Settings")
         model_action = QAction("Model Setup…", self)
@@ -231,6 +351,36 @@ class MainWindow(QMainWindow):
         apply_last_action = QAction("Apply Last Generated Code…", self)
         apply_last_action.triggered.connect(self._apply_last_generated_code)
         ai_menu.addAction(apply_last_action)
+
+        help_menu = menubar.addMenu("&Help")
+        about_action = QAction("About", self)
+        about_action.triggered.connect(
+            lambda: QMessageBox.information(self, "About", "GGUF Code Agent")
+        )
+        help_menu.addAction(about_action)
+
+    def _apply_theme(self, theme: str, save: bool = True):
+        theme_key = theme if theme in VALID_UI_THEMES else "dark"
+        self.settings.ui_theme = theme_key
+
+        self.setStyleSheet(DARK_STYLESHEET if theme_key == "dark" else LIGHT_STYLESHEET)
+        self.editor_tabs.apply_theme(theme_key)
+
+        if hasattr(self, "theme_dark_action"):
+            self.theme_dark_action.setChecked(theme_key == "dark")
+        if hasattr(self, "theme_light_action"):
+            self.theme_light_action.setChecked(theme_key == "light")
+
+        if save:
+            self.settings.save()
+
+    def _set_code_editor_visible(self, visible: bool, save: bool = True):
+        self.settings.show_code_editor = bool(visible)
+        self.editor_tabs.setVisible(self.settings.show_code_editor)
+        if hasattr(self, "toggle_editor_action"):
+            self.toggle_editor_action.setChecked(self.settings.show_code_editor)
+        if save:
+            self.settings.save()
 
     def _build_toolbar(self):
         toolbar = QToolBar("Main")
@@ -353,6 +503,8 @@ class MainWindow(QMainWindow):
         self._sync_undo_redo_state()
 
     def _sync_undo_redo_state(self):
+        if not hasattr(self, "undo_action") or not hasattr(self, "redo_action"):
+            return
         editor = self.editor_tabs.current_editor()
         has_editor = editor is not None
         self.undo_action.setEnabled(has_editor and editor.document().isUndoAvailable())

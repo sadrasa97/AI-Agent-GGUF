@@ -14,6 +14,15 @@ from config.settings import Settings
 os.environ.setdefault("LLAMA_LOG_LEVEL", "3")
 
 
+def get_model_config() -> dict:
+    """Backward-compatible helper used by older imports."""
+    settings = Settings.load() if hasattr(Settings, "load") else Settings()
+    model_config = getattr(settings, "model_config", None)
+    if isinstance(model_config, dict):
+        return dict(model_config)
+    return {}
+
+
 class LLMEngine:
     """Loads a GGUF model and exposes a streaming completion interface."""
 
@@ -130,3 +139,4 @@ class LLMEngine:
         for chunk in stream:
             token = chunk["choices"][0]["text"]
             yield token
+

@@ -16,17 +16,22 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Signal, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QObject, QThread, Signal, Qt, QTimer
+from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QComboBox, QFileDialog, QFrame, QScrollArea,
-    QSizePolicy,
+    QSizePolicy, QApplication,
 )
 
 from config.settings import Settings
 from agent.providers import create_provider, ProviderError
 from tools.code_tools import list_workspace_files, read_text_file
+from tools.voice_input import (
+    VoiceError,
+    record_microphone_wav_until_stop,
+    transcribe_audio_file,
+)
 
 # Attached files larger than this are truncated when inlined into the prompt.
 MAX_ATTACHMENT_CHARS = 20_000
@@ -67,6 +72,42 @@ class GenerationWorker(QObject):
             self.error.emit(f"Unexpected error: {exc}")
         finally:
             provider.close()
+            self.finished.emit()
+
+
+class VoiceTranscriptionWorker(QObject):
+    status = Signal(str)
+    transcript = Signal(str)
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, settings: Settings):
+        super().__init__()
+        self.settings = settings
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        wav_path: Optional[Path] = None
+        try:
+            sample_rate = int(getattr(self.settings, "asr_sample_rate", 16000) or 16000)
+            self.status.emit("Recording... click the mic button again to stop.")
+            wav_path = record_microphone_wav_until_stop(sample_rate=sample_rate, should_stop=lambda: self._stop)
+            self.status.emit("Transcribing with Qwen Voice...")
+            text = transcribe_audio_file(wav_path, self.settings)
+            self.transcript.emit(text)
+        except VoiceError as exc:
+            self.error.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(f"Voice capture failed: {exc}")
+        finally:
+            if wav_path is not None:
+                try:
+                    wav_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
             self.finished.emit()
 
 
@@ -132,6 +173,7 @@ class ChatBubble(QFrame):
         super().__init__(parent)
         self.role = role
         self._raw_html = ""
+        self._copy_text = ""
         style = self.ROLE_STYLES.get(role, self.ROLE_STYLES["assistant"])
 
         self.setObjectName("bubble")
@@ -186,6 +228,22 @@ class ChatBubble(QFrame):
         self.content.setFont(content_font)
         outer.addWidget(self.content)
 
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 2, 0, 0)
+        footer.addStretch()
+        self.copy_btn = QPushButton("Copy")
+        self.copy_btn.setVisible(False)
+        self.copy_btn.setToolTip("Copy response")
+        self.copy_btn.setStyleSheet(
+            "QPushButton { background:#232427; color:#c9c9cc; padding:3px 9px; border:1px solid #3a3b40; "
+            "border-radius:8px; font-size:10px; font-weight:600; }"
+            "QPushButton:hover { background:#2f3034; border:1px solid #4a4b52; }"
+            "QPushButton:pressed { background:#1e1f22; }"
+        )
+        self.copy_btn.clicked.connect(self._copy_text_to_clipboard)
+        footer.addWidget(self.copy_btn)
+        outer.addLayout(footer)
+
     def set_tag(self, text: str):
         if text:
             self.tag_label.setText(text)
@@ -196,6 +254,7 @@ class ChatBubble(QFrame):
     def set_html(self, html: str):
         self._raw_html = html
         self.content.setText(html if html else "&nbsp;")
+        self._copy_text = html.replace("<br/>", "\n").replace("<br>", "\n")
 
     def append_plain(self, text: str):
         escaped = (
@@ -205,11 +264,24 @@ class ChatBubble(QFrame):
             .replace("\n", "<br/>")
         )
         self._raw_html += escaped
+        self._copy_text += text
         self.content.setText(self._raw_html)
 
     def clear_content(self):
         self._raw_html = ""
+        self._copy_text = ""
         self.content.setText("")
+
+    def set_copy_text(self, text: str):
+        self._copy_text = text or ""
+        self.copy_btn.setVisible(bool(self._copy_text.strip()))
+
+    def _copy_text_to_clipboard(self):
+        if not self._copy_text.strip():
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self._copy_text)
+        self.copy_btn.setText("Copied")
 
 
 class ChatPanel(QWidget):
@@ -225,10 +297,17 @@ class ChatPanel(QWidget):
         self.history: list[dict] = []
         self._thread: Optional[QThread] = None
         self._worker: Optional[GenerationWorker] = None
+        self._voice_thread: Optional[QThread] = None
+        self._voice_worker: Optional[VoiceTranscriptionWorker] = None
         self._response_buffer = ""
         self._attachments: list[Path] = []
-        self.mode = "Agent"  # "Chat", "Agent", or "Plan" — Agent is the default
+        self.mode = "Chat"  # "Chat", "Agent", or "Plan" — Agent is the default
         self._current_assistant_bubble: Optional[ChatBubble] = None
+        self._is_generating = False
+        self._pending_tokens: list[str] = []
+        self._stream_flush_timer = QTimer(self)
+        self._stream_flush_timer.setInterval(35)
+        self._stream_flush_timer.timeout.connect(self._flush_stream_tokens)
 
         self.setStyleSheet("background:#1a1b1e;")
 
@@ -309,7 +388,7 @@ class ChatPanel(QWidget):
         self.input_box.setStyleSheet(
             "QPlainTextEdit { background:transparent; color:#eee; border:none; padding:2px; }"
         )
-        self.input_box.submitRequested.connect(self.send_message)
+        self.input_box.submitRequested.connect(self._on_send_or_stop)
         composer_layout.addWidget(self.input_box)
 
         composer_btn_row = QHBoxLayout()
@@ -337,6 +416,11 @@ class ChatPanel(QWidget):
         self.attach_btn.clicked.connect(self.attach_file)
         composer_btn_row.addWidget(self.attach_btn)
 
+        self.voice_btn = QPushButton("🎤")
+        self.voice_btn.setToolTip("Record voice (click again to stop and transcribe)")
+        self.voice_btn.clicked.connect(self._toggle_voice_recording)
+        composer_btn_row.addWidget(self.voice_btn)
+
         self.clear_btn = QPushButton("🗑")
         self.clear_btn.setToolTip("Clear conversation")
         self.clear_btn.clicked.connect(self.clear_history)
@@ -344,15 +428,9 @@ class ChatPanel(QWidget):
 
         composer_btn_row.addStretch()
 
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setToolTip("Stop generation")
-        self.stop_btn.clicked.connect(self.stop_generation)
-        self.stop_btn.setEnabled(False)
-        composer_btn_row.addWidget(self.stop_btn)
-
         self.send_btn = QPushButton("➤")
         self.send_btn.setToolTip("Send (Enter)")
-        self.send_btn.clicked.connect(self.send_message)
+        self.send_btn.clicked.connect(self._on_send_or_stop)
         composer_btn_row.addWidget(self.send_btn)
         composer_layout.addLayout(composer_btn_row)
 
@@ -375,16 +453,11 @@ class ChatPanel(QWidget):
             "QPushButton:pressed { background:#1e1f22; }"
         )
         self.attach_btn.setStyleSheet(icon_btn_style)
+        self.voice_btn.setStyleSheet(icon_btn_style)
         self.clear_btn.setStyleSheet(
             icon_btn_style.replace("color:#c9c9cc", "color:#8a8b90").replace(
                 "QPushButton:hover { background:#2f3034;", "QPushButton:hover { background:#3a2c2c; color:#f48771;"
             )
-        )
-        self.stop_btn.setStyleSheet(
-            "QPushButton { background:#232427; color:#c9c9cc; padding:4px 12px; border:1px solid #38393e; "
-            "border-radius:9px; font-size:11px; font-weight:600; }"
-            "QPushButton:hover { background:#3a2c2c; color:#f48771; border:1px solid #5a3535; }"
-            "QPushButton:disabled { background:#1e1f22; color:#4a4a4e; border:1px solid #262729; }"
         )
         self.send_btn.setStyleSheet(
             "QPushButton { background:#6c8cff; color:white; padding:4px 12px; border:none; "
@@ -404,6 +477,33 @@ class ChatPanel(QWidget):
         self.settings.backend = text
         self.settings.save()
 
+    def _on_send_or_stop(self):
+        if self._is_generating:
+            self.stop_generation()
+            return
+        self.send_message()
+
+    def _set_generation_state(self, generating: bool):
+        self._is_generating = generating
+        if generating:
+            self.send_btn.setText("Stop")
+            self.send_btn.setToolTip("Stop generation")
+            self.send_btn.setStyleSheet(
+                "QPushButton { background:#3a2c2c; color:#f48771; padding:4px 12px; border:1px solid #5a3535; "
+                "border-radius:9px; font-size:11px; font-weight:700; }"
+                "QPushButton:hover { background:#4a3131; color:#ff9b8c; border:1px solid #6a4040; }"
+                "QPushButton:pressed { background:#2f2121; }"
+            )
+            return
+        self.send_btn.setText("➤")
+        self.send_btn.setToolTip("Send (Enter)")
+        self.send_btn.setStyleSheet(
+            "QPushButton { background:#6c8cff; color:white; padding:4px 12px; border:none; "
+            "border-radius:9px; font-weight:700; font-size:12px; min-width:22px; }"
+            "QPushButton:hover { background:#7d9aff; }"
+            "QPushButton:pressed { background:#5b78e0; }"
+        )
+
     def _on_mode_changed(self, text: str):
         self.mode = text
         if text == "Plan":
@@ -422,6 +522,71 @@ class ChatPanel(QWidget):
             if w:
                 w.deleteLater()
         self._current_assistant_bubble = None
+
+    def _toggle_voice_recording(self):
+        if self._voice_thread is not None:
+            if self._voice_worker:
+                self._voice_worker.stop()
+            return
+
+        self._voice_worker = VoiceTranscriptionWorker(self.settings)
+        self._voice_thread = QThread()
+        self._voice_worker.moveToThread(self._voice_thread)
+
+        self._voice_thread.started.connect(self._voice_worker.run)
+        self._voice_worker.status.connect(self._on_voice_status)
+        self._voice_worker.transcript.connect(self._on_voice_transcript)
+        self._voice_worker.error.connect(self._on_voice_error)
+        self._voice_worker.finished.connect(self._on_voice_finished)
+
+        self.voice_btn.setText("■")
+        self.voice_btn.setToolTip("Stop recording")
+        self.voice_btn.setStyleSheet(
+            "QPushButton { background:#3a2c2c; color:#f48771; padding:4px 7px; border:1px solid #5a3535; "
+            "border-radius:9px; font-size:11px; min-width:14px; }"
+            "QPushButton:hover { background:#4a3131; color:#ff9b8c; border:1px solid #6a4040; }"
+            "QPushButton:pressed { background:#2f2121; }"
+        )
+        self._voice_thread.start()
+
+    def _on_voice_status(self, text: str):
+        bubble = self._add_bubble("system")
+        bubble.set_html(self._escape(text))
+        self._scroll_to_bottom()
+
+    def _on_voice_transcript(self, text: str):
+        current = self.input_box.toPlainText().strip()
+        merged = f"{current}\n{text}" if current else text
+        self.input_box.setPlainText(merged)
+        self.input_box.setFocus()
+        cursor = self.input_box.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.input_box.setTextCursor(cursor)
+
+        bubble = self._add_bubble("system")
+        bubble.set_html("Voice transcribed and inserted into the composer.")
+        self._scroll_to_bottom()
+
+    def _on_voice_error(self, msg: str):
+        bubble = self._add_bubble("error")
+        bubble.set_html(self._escape(msg))
+        self._scroll_to_bottom()
+
+    def _on_voice_finished(self):
+        if self._voice_thread:
+            self._voice_thread.quit()
+            self._voice_thread.wait()
+        self._voice_thread = None
+        self._voice_worker = None
+
+        self.voice_btn.setText("🎤")
+        self.voice_btn.setToolTip("Record voice (click again to stop and transcribe)")
+        self.voice_btn.setStyleSheet(
+            "QPushButton { background:#232427; color:#c9c9cc; padding:4px 7px; border:1px solid #38393e; "
+            "border-radius:9px; font-size:11px; min-width:14px; }"
+            "QPushButton:hover { background:#2f3034; border:1px solid #47484d; }"
+            "QPushButton:pressed { background:#1e1f22; }"
+        )
 
     # ------------------------------------------------------------------
     # Bubble management
@@ -672,8 +837,7 @@ class ChatPanel(QWidget):
         self._worker.finished.connect(self._on_finished)
         self._thread.start()
 
-        self.send_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self._set_generation_state(True)
 
     def stop_generation(self):
         if self._worker:
@@ -682,14 +846,24 @@ class ChatPanel(QWidget):
     def _on_token(self, tok: str):
         if self._current_assistant_bubble is None:
             return
+        self._pending_tokens.append(tok)
+        if not self._stream_flush_timer.isActive():
+            self._stream_flush_timer.start()
+
+    def _flush_stream_tokens(self):
+        if self._current_assistant_bubble is None or not self._pending_tokens:
+            return
+        chunk = "".join(self._pending_tokens)
+        self._pending_tokens.clear()
         if not self._response_buffer:
-            # first token arrived — clear the "Thinking…" placeholder
+            # first streamed chunk arrived — clear the "Thinking…" placeholder
             self._current_assistant_bubble.clear_content()
-        self._response_buffer += tok
-        self._current_assistant_bubble.append_plain(tok)
+        self._response_buffer += chunk
+        self._current_assistant_bubble.append_plain(chunk)
         self._scroll_to_bottom()
 
     def _on_error(self, msg: str):
+        self._flush_stream_tokens()
         if self._current_assistant_bubble is not None and not self._response_buffer:
             # replace the empty/"thinking" assistant card with an error card
             idx = self.messages_layout.indexOf(self._current_assistant_bubble)
@@ -699,11 +873,16 @@ class ChatPanel(QWidget):
             self._current_assistant_bubble = None
         error_bubble = self._add_bubble("error")
         error_bubble.set_html(self._escape(msg))
+        error_bubble.set_copy_text(msg)
         self._scroll_to_bottom()
 
     def _on_finished(self):
+        self._flush_stream_tokens()
+        self._stream_flush_timer.stop()
         if self._response_buffer.strip():
             self.history.append({"role": "assistant", "content": self._response_buffer})
+            if self._current_assistant_bubble is not None:
+                self._current_assistant_bubble.set_copy_text(self._response_buffer)
             blocks = self._extract_code_blocks(self._response_buffer)
             applied_paths: list[str] = []
             for lang, code, path in blocks:
@@ -734,8 +913,7 @@ class ChatPanel(QWidget):
             self._thread.wait()
         self._thread = None
         self._worker = None
-        self.send_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self._set_generation_state(False)
         self._scroll_to_bottom()
 
     @staticmethod

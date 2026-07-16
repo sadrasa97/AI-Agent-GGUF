@@ -75,8 +75,19 @@ class GGUFProvider(BaseProvider):
         try:
             from llama_cpp import Llama
         except ImportError as exc:
+            msg = str(exc)
+            if "_multiarray_umath" in msg or "numpy C-extensions" in msg or "DLL load failed" in msg:
+                raise ProviderError(
+                    "GGUF backend dependencies are broken in this Python environment.\n"
+                    f"Import error: {msg}\n"
+                    "Most common cause: corrupted/incompatible NumPy wheel in the active venv.\n"
+                    "Repair with:\n"
+                    "  python -m pip uninstall -y numpy\n"
+                    "  python -m pip install --no-cache-dir --force-reinstall numpy==1.26.4\n"
+                    "Then retry sending your message."
+                ) from exc
             raise ProviderError(
-                "llama-cpp-python is not installed.\n"
+                "llama-cpp-python is not installed in the active Python environment.\n"
                 "Run:  pip install llama-cpp-python\n"
                 "GPU:  pip install llama-cpp-python --extra-index-url "
                 "https://abetlen.github.io/llama-cpp-python/whl/cu121"

@@ -4,23 +4,100 @@ numbers, wrapped in a QTabWidget so multiple files can be open at once.
 """
 from __future__ import annotations
 
+import ast
+import json
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QTextFormat, QTextCursor, QTextDocument, QKeySequence
+from PySide6.QtCore import QRect, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QFont, QPainter, QTextFormat, QTextCursor, QTextDocument, QKeySequence, QTextCharFormat
 from PySide6.QtWidgets import (
-    QPlainTextEdit, QTabWidget, QTextEdit, QWidget, QMessageBox, QFileDialog,
-    QHBoxLayout, QVBoxLayout, QLineEdit, QPushButton, QLabel, QFrame, QSizePolicy,
+    QPlainTextEdit, QTabWidget, QTabBar, QTextEdit, QWidget, QMessageBox, QFileDialog,
+    QHBoxLayout, QVBoxLayout, QLineEdit, QPushButton, QLabel, QFrame, QSizePolicy, QToolButton,
 )
 
 from ui_qt.syntax import CodeHighlighter
 
-EDITOR_BG = "#1e1e1e"
-EDITOR_FG = "#d4d4d4"
-GUTTER_BG = "#1e1e1e"
-GUTTER_FG = "#858585"
-CURRENT_LINE_BG = QColor("#2a2d2e")
+THEMES = {
+    "dark": {
+        "editor_bg": "#1e1e1e",
+        "editor_fg": "#d4d4d4",
+        "gutter_bg": "#1e1e1e",
+        "gutter_fg": "#858585",
+        "current_line_bg": QColor("#2a2d2e"),
+        "selection_bg": "#264f78",
+        "error_bg": QColor("#51202a"),
+        "error_underline": QColor("#f14c4c"),
+        "find_bar_style": """
+            QFrame#findBar { background:#252526; border-bottom:1px solid #3a3b40; }
+            QLineEdit { background:#2b2d31; color:#eee; border:1px solid #3a3b40; border-radius:5px; padding:3px 6px; }
+            QLineEdit:focus { border:1px solid #6c8cff; }
+            QPushButton#toolBtn { background:#2b2d31; color:#c9c9cc; border:1px solid #3a3b40; border-radius:5px; padding:2px 7px; }
+            QPushButton#toolBtn:hover { background:#35363b; }
+            QPushButton#toolBtn:checked { background:#3d5a99; color:white; border:1px solid #6c8cff; }
+            QLabel#matchLabel { color:#9a9ba1; font-size:11px; padding:0 4px; }
+        """,
+        "tabs_style": """
+            QTabWidget::pane { border: none; background: #1e1e1e; top: -1px; }
+            QTabBar { qproperty-drawBase: 0; }
+            QTabBar::tab {
+                background: #2d2d2d;
+                color: #cccccc;
+                padding: 8px 28px 8px 12px;
+                margin-right: 1px;
+                border: none;
+                border-top: 1px solid #2d2d2d;
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background: #1e1e1e;
+                color: #ffffff;
+                border-top: 1px solid #007acc;
+            }
+            QTabBar::tab:hover:!selected { background: #383838; }
+        """,
+        "tab_close_btn": "QToolButton { color:#c5c5c5; background: transparent; border: none; padding: 0px; } QToolButton:hover { color:#ffffff; background:#444444; border-radius:4px; }",
+    },
+    "light": {
+        "editor_bg": "#ffffff",
+        "editor_fg": "#1f1f1f",
+        "gutter_bg": "#f8f8f8",
+        "gutter_fg": "#616161",
+        "current_line_bg": QColor("#f3f7ff"),
+        "selection_bg": "#cce2ff",
+        "error_bg": QColor("#ffdce0"),
+        "error_underline": QColor("#d13438"),
+        "find_bar_style": """
+            QFrame#findBar { background:#f7f7f7; border-bottom:1px solid #d9d9d9; }
+            QLineEdit { background:#ffffff; color:#222; border:1px solid #c8c8c8; border-radius:5px; padding:3px 6px; }
+            QLineEdit:focus { border:1px solid #0078d4; }
+            QPushButton#toolBtn { background:#ffffff; color:#333; border:1px solid #c8c8c8; border-radius:5px; padding:2px 7px; }
+            QPushButton#toolBtn:hover { background:#f0f6ff; }
+            QPushButton#toolBtn:checked { background:#d8eafe; color:#003a75; border:1px solid #80b7f8; }
+            QLabel#matchLabel { color:#555; font-size:11px; padding:0 4px; }
+        """,
+        "tabs_style": """
+            QTabWidget::pane { border: none; background: #ffffff; top: -1px; }
+            QTabBar { qproperty-drawBase: 0; }
+            QTabBar::tab {
+                background: #ececec;
+                color: #444444;
+                padding: 8px 28px 8px 12px;
+                margin-right: 1px;
+                border: none;
+                border-top: 1px solid #ececec;
+                font-size: 11px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #111111;
+                border-top: 1px solid #0078d4;
+            }
+            QTabBar::tab:hover:!selected { background: #e2eaf8; }
+        """,
+        "tab_close_btn": "QToolButton { color:#4c4c4c; background: transparent; border: none; padding: 0px; } QToolButton:hover { color:#111111; background:#d9d9d9; border-radius:4px; }",
+    },
+}
 
 
 class LineNumberArea(QWidget):
@@ -45,6 +122,8 @@ class CodeEditor(QPlainTextEdit):
         super().__init__(parent)
         self.file_path = file_path
         self.is_dirty = False
+        self.theme = "dark"
+        self._error_selections: list[QTextEdit.ExtraSelection] = []
 
         font = QFont("JetBrains Mono, Consolas, Menlo, monospace")
         font.setStyleHint(QFont.Monospace)
@@ -64,11 +143,14 @@ class CodeEditor(QPlainTextEdit):
         ext = file_path.suffix.lstrip(".") if file_path else "py"
         self.highlighter = CodeHighlighter(self.document(), ext)
 
-        self.setStyleSheet(
-            f"QPlainTextEdit {{ background-color: {EDITOR_BG}; color: {EDITOR_FG}; "
-            f"border: none; selection-background-color: #264F78; }}"
-        )
+        self._diagnostic_timer = QTimer(self)
+        self._diagnostic_timer.setSingleShot(True)
+        self._diagnostic_timer.setInterval(550)
+        self._diagnostic_timer.timeout.connect(self._run_diagnostics)
+
+        self.apply_theme("dark")
         self.textChanged.connect(self._mark_dirty)
+        self.textChanged.connect(self._queue_diagnostics)
 
     # -- dirty tracking -------------------------------------------------
     def _mark_dirty(self):
@@ -100,7 +182,7 @@ class CodeEditor(QPlainTextEdit):
 
     def line_number_area_paint_event(self, event):
         painter = QPainter(self._line_area)
-        painter.fillRect(event.rect(), QColor(GUTTER_BG))
+        painter.fillRect(event.rect(), QColor(THEMES[self.theme]["gutter_bg"]))
 
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()
@@ -110,7 +192,7 @@ class CodeEditor(QPlainTextEdit):
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 number = str(block_number + 1)
-                painter.setPen(QColor(GUTTER_FG))
+                painter.setPen(QColor(THEMES[self.theme]["gutter_fg"]))
                 painter.drawText(
                     0, top, self._line_area.width() - 6, self.fontMetrics().height(),
                     Qt.AlignRight, number,
@@ -124,12 +206,65 @@ class CodeEditor(QPlainTextEdit):
         extra_selections = []
         if not self.isReadOnly():
             sel = QTextEdit.ExtraSelection()
-            sel.format.setBackground(CURRENT_LINE_BG)
+            sel.format.setBackground(THEMES[self.theme]["current_line_bg"])
             sel.format.setProperty(QTextFormat.FullWidthSelection, True)
             sel.cursor = self.textCursor()
             sel.cursor.clearSelection()
             extra_selections.append(sel)
-        self.setExtraSelections(extra_selections)
+        self.setExtraSelections(extra_selections + self._error_selections)
+
+    def apply_theme(self, theme: str):
+        self.theme = theme if theme in THEMES else "dark"
+        spec = THEMES[self.theme]
+        self.setStyleSheet(
+            "QPlainTextEdit {"
+            f" background-color: {spec['editor_bg']};"
+            f" color: {spec['editor_fg']};"
+            " border: none;"
+            f" selection-background-color: {spec['selection_bg']};"
+            " }"
+        )
+        self._line_area.update()
+        self._highlight_current_line()
+
+    def _queue_diagnostics(self):
+        self._diagnostic_timer.start()
+
+    def _run_diagnostics(self):
+        ext = (self.file_path.suffix.lstrip(".") if self.file_path else self.highlighter.extension).lower()
+        text = self.toPlainText()
+        errors: list[tuple[int, str]] = []
+
+        if ext == "py":
+            try:
+                ast.parse(text or "\n")
+            except SyntaxError as exc:
+                if exc.lineno:
+                    errors.append((exc.lineno, exc.msg or "Syntax error"))
+        elif ext == "json":
+            try:
+                json.loads(text or "{}")
+            except json.JSONDecodeError as exc:
+                errors.append((max(1, exc.lineno), exc.msg))
+
+        new_selections: list[QTextEdit.ExtraSelection] = []
+        for line_number, message in errors:
+            block = self.document().findBlockByNumber(line_number - 1)
+            if not block.isValid():
+                continue
+            cursor = QTextCursor(block)
+            cursor.select(QTextCursor.LineUnderCursor)
+
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.format.setBackground(THEMES[self.theme]["error_bg"])
+            sel.format.setUnderlineColor(THEMES[self.theme]["error_underline"])
+            sel.format.setUnderlineStyle(QTextCharFormat.WaveUnderline)
+            sel.format.setProperty(QTextFormat.ToolTip, message)
+            new_selections.append(sel)
+
+        self._error_selections = new_selections
+        self._highlight_current_line()
 
     # -- find / replace shortcuts ---------------------------------------
     def keyPressEvent(self, event):
@@ -147,21 +282,11 @@ class CodeEditor(QPlainTextEdit):
 class FindReplaceBar(QFrame):
     """VS-Code-style inline Find/Replace bar for a single CodeEditor."""
 
-    BAR_STYLE = """
-    QFrame#findBar { background:#252526; border-bottom:1px solid #3a3b40; }
-    QLineEdit { background:#2b2d31; color:#eee; border:1px solid #3a3b40; border-radius:5px; padding:3px 6px; }
-    QLineEdit:focus { border:1px solid #6c8cff; }
-    QPushButton#toolBtn { background:#2b2d31; color:#c9c9cc; border:1px solid #3a3b40; border-radius:5px; padding:2px 7px; }
-    QPushButton#toolBtn:hover { background:#35363b; }
-    QPushButton#toolBtn:checked { background:#3d5a99; color:white; border:1px solid #6c8cff; }
-    QLabel#matchLabel { color:#9a9ba1; font-size:11px; padding:0 4px; }
-    """
-
     def __init__(self, editor: "CodeEditor", parent=None):
         super().__init__(parent)
         self.editor = editor
         self.setObjectName("findBar")
-        self.setStyleSheet(self.BAR_STYLE)
+        self.apply_theme("dark")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 6, 8, 6)
@@ -247,6 +372,10 @@ class FindReplaceBar(QFrame):
         root.addWidget(self.replace_widget)
 
         self.hide()
+
+    def apply_theme(self, theme: str):
+        theme_key = theme if theme in THEMES else "dark"
+        self.setStyleSheet(THEMES[theme_key]["find_bar_style"])
 
     # ------------------------------------------------------------------
     def show_bar(self, with_replace: bool = False):
@@ -415,9 +544,12 @@ class EditorTabs(QTabWidget):
         self.setTabsClosable(True)
         self.setMovable(True)
         self.setDocumentMode(True)
+        self.setElideMode(Qt.ElideRight)
         self.tabCloseRequested.connect(self._close_tab)
         self.currentChanged.connect(self._on_current_changed)
         self._untitled_count = 0
+        self.theme = "dark"
+        self.apply_theme("dark")
 
     # ------------------------------------------------------------------
     def open_file(self, path: Path):
@@ -437,8 +569,11 @@ class EditorTabs(QTabWidget):
         editor.mark_clean()
         page = EditorPage(editor)
         idx = self.addTab(page, path.name)
+        self._install_close_button(idx)
         self.setCurrentIndex(idx)
         self.setTabToolTip(idx, str(path))
+        page.find_bar.apply_theme(self.theme)
+        page.editor.apply_theme(self.theme)
 
     def new_untitled(self, template_code: str = "", language: str = "py"):
         self._untitled_count += 1
@@ -449,7 +584,10 @@ class EditorTabs(QTabWidget):
         page = EditorPage(editor)
         title = f"Untitled-{self._untitled_count}"
         idx = self.addTab(page, title)
+        self._install_close_button(idx)
         self.setCurrentIndex(idx)
+        page.find_bar.apply_theme(self.theme)
+        page.editor.apply_theme(self.theme)
         return editor
 
     def current_editor(self) -> Optional[CodeEditor]:
@@ -482,6 +620,8 @@ class EditorTabs(QTabWidget):
         self.fileSaved.emit(path)
 
     def _close_tab(self, index: int):
+        if index < 0 or index >= self.count():
+            return
         page = self.widget(index)
         editor = page.editor
         if editor.is_dirty:
@@ -501,6 +641,34 @@ class EditorTabs(QTabWidget):
     def _on_current_changed(self, index: int):
         page = self.widget(index) if index >= 0 else None
         self.activeFileChanged.emit(page.editor.file_path if page else None)
+
+    def apply_theme(self, theme: str):
+        self.theme = theme if theme in THEMES else "dark"
+        spec = THEMES[self.theme]
+        self.setStyleSheet(spec["tabs_style"])
+
+        for i in range(self.count()):
+            page = self.widget(i)
+            page.editor.apply_theme(self.theme)
+            page.find_bar.apply_theme(self.theme)
+            self._install_close_button(i)
+
+    def _install_close_button(self, index: int):
+        btn = QToolButton(self)
+        btn.setText("×")
+        btn.setAutoRaise(True)
+        btn.setCursor(Qt.ArrowCursor)
+        btn.setFixedSize(16, 16)
+        btn.setStyleSheet(THEMES[self.theme]["tab_close_btn"])
+        btn.clicked.connect(lambda _=False, b=btn: self._close_tab(self._index_for_close_button(b)))
+        self.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, btn)
+
+    def _index_for_close_button(self, button: QToolButton) -> int:
+        tab_bar = self.tabBar()
+        for i in range(self.count()):
+            if tab_bar.tabButton(i, QTabBar.ButtonPosition.RightSide) is button:
+                return i
+        return -1
 
     def mark_tab_dirty_titles(self):
         """Call periodically (or on textChanged) to add '*' to dirty tab titles."""

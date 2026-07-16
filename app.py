@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QPalette, QColor, QIcon
 from PySide6.QtCore import Qt
 
 from config.settings import Settings, VALID_BACKENDS, CONFIG_DIR
@@ -32,6 +32,18 @@ PROJECT_MARKERS = (
     ".git", "pyproject.toml", "requirements.txt", "package.json", "Cargo.toml",
     "go.mod", "CMakeLists.txt", "README.md", "readme.md",
 )
+APP_LOGO_FILE = "ChatGPT Image Jul 15, 2026, 11_59_51 AM.png"
+
+
+def _load_app_icon() -> QIcon | None:
+    logo_path = Path(__file__).resolve().parent / APP_LOGO_FILE
+    if not logo_path.exists():
+        return None
+
+    icon = QIcon(str(logo_path))
+    if icon.isNull():
+        return None
+    return icon
 
 
 def _looks_like_project_root(path: Path) -> bool:
@@ -120,6 +132,7 @@ def parse_args() -> argparse.Namespace:
 
 def build_settings(args: argparse.Namespace) -> Settings:
     settings = Settings.load()
+    settings.normalize_ui_preferences()
 
     explicit_workspace: Path | None = None
     if args.workspace:
@@ -194,6 +207,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("GGUF Code Agent")
+    app_icon = _load_app_icon()
+    if app_icon is not None:
+        app.setWindowIcon(app_icon)
     apply_dark_palette(app)
 
     workspace_path = Path(settings.workspace).expanduser().resolve()
@@ -201,7 +217,9 @@ def main():
     remember_workspace(workspace_path)
 
     window = MainWindow(settings)
-    window.show()
+    if app_icon is not None:
+        window.setWindowIcon(app_icon)
+    window.showMaximized()
 
     sys.exit(app.exec())
 

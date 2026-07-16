@@ -7,13 +7,14 @@ from pathlib import Path
 import sys
 
 from PySide6.QtCore import QProcess, Qt
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtGui import QFont, QTextCursor, QAction
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
-    QComboBox,
+    QToolButton,
+    QMenu,
     QPushButton,
     QPlainTextEdit,
     QLineEdit,
@@ -99,21 +100,41 @@ class OutputPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
 
+        self._current_shell = next(iter(self.SHELLS.keys()))
+
         top = QHBoxLayout()
+        top.setSpacing(4)
         top.addWidget(QLabel("TERMINAL"))
         top.addStretch()
 
-        self.shell_combo = QComboBox()
-        self.shell_combo.addItems(list(self.SHELLS.keys()))
-        self.shell_combo.currentTextChanged.connect(self._restart_terminal)
-        top.addWidget(self.shell_combo)
+        # Compact shell picker: a small toolbutton with a dropdown menu instead of a
+        # full-width QComboBox, so the header bar stays thin and more room is left
+        # for the terminal itself (and, above it, the chat dock reaching full height).
+        self.shell_btn = QToolButton()
+        self.shell_btn.setPopupMode(QToolButton.InstantPopup)
+        self.shell_btn.setText(self._current_shell)
+        self.shell_btn.setToolTip("Choose shell (PowerShell / Command Prompt)")
+        self.shell_btn.setStyleSheet(
+            "QToolButton { padding: 3px 8px; border-radius: 6px; }"
+            "QToolButton::menu-indicator { image: none; }"
+        )
+        shell_menu = QMenu(self.shell_btn)
+        for shell_name in self.SHELLS:
+            action = QAction(shell_name, self)
+            action.triggered.connect(lambda _checked=False, s=shell_name: self._on_shell_selected(s))
+            shell_menu.addAction(action)
+        self.shell_btn.setMenu(shell_menu)
+        top.addWidget(self.shell_btn)
 
-        self.clear_btn = QPushButton("Clear")
+        self.clear_btn = QToolButton()
+        self.clear_btn.setText("Clear")
         self.clear_btn.clicked.connect(lambda: self.output.clear())
         top.addWidget(self.clear_btn)
 
-        self.restart_btn = QPushButton("Restart")
-        self.restart_btn.clicked.connect(lambda: self._restart_terminal(self.shell_combo.currentText()))
+        self.restart_btn = QToolButton()
+        self.restart_btn.setText("⟳")
+        self.restart_btn.setToolTip("Restart terminal")
+        self.restart_btn.clicked.connect(lambda: self._restart_terminal(self._current_shell))
         top.addWidget(self.restart_btn)
         root.addLayout(top)
 
@@ -137,7 +158,12 @@ class OutputPanel(QWidget):
         bottom.addWidget(self.run_btn)
         root.addLayout(bottom)
 
-        self._restart_terminal(self.shell_combo.currentText())
+        self._restart_terminal(self._current_shell)
+
+    def _on_shell_selected(self, shell_name: str):
+        self._current_shell = shell_name
+        self.shell_btn.setText(shell_name)
+        self._restart_terminal(shell_name)
 
     def set_working_directory(self, path: Path):
         self.workspace_path = Path(path).resolve()
@@ -151,7 +177,7 @@ class OutputPanel(QWidget):
             self._handle_ai_task(command)
             return
         if self.process.state() != QProcess.Running:
-            self._restart_terminal(self.shell_combo.currentText())
+            self._restart_terminal(self._current_shell)
         if self.process.state() != QProcess.Running:
             self.output.appendPlainText("[terminal] shell is not running.")
             return
@@ -252,7 +278,7 @@ class OutputPanel(QWidget):
 
     def execute_file(self, path: Path) -> bool:
         ext = path.suffix.lower()
-        shell = self.shell_combo.currentText()
+        shell = self._current_shell
         p = str(path)
         py = str(Path(sys.executable))
 
@@ -304,7 +330,7 @@ class OutputPanel(QWidget):
             return
 
     def _send_cd(self, path: Path):
-        shell_name = self.shell_combo.currentText()
+        shell_name = self._current_shell
         if shell_name == "Command Prompt":
             cmd = f'cd /d "{path}"'
         else:

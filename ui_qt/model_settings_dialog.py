@@ -30,7 +30,7 @@ class ModelSettingsDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("Model Settings")
-        self.resize(640, 360)
+        self.resize(760, 620)
 
         root = QVBoxLayout(self)
 
@@ -73,6 +73,41 @@ class ModelSettingsDialog(QDialog):
         nvidia_form.addRow("Model", self.nvidia_model_edit)
         root.addWidget(nvidia_group)
 
+        voice_group = QGroupBox("Qwen Voice (ASR)")
+        voice_form = QFormLayout(voice_group)
+
+        self.asr_backend_combo = QComboBox()
+        self.asr_backend_combo.addItems(["local", "api"])
+        self.asr_backend_combo.setCurrentText((self.settings.asr_backend or "local").strip().lower())
+        voice_form.addRow("ASR backend", self.asr_backend_combo)
+
+        qwen_voice_row = QHBoxLayout()
+        self.qwen_voice_model_edit = QLineEdit(self.settings.qwen_voice_model_path)
+        qwen_voice_browse_btn = QPushButton("Browse...")
+        qwen_voice_browse_btn.clicked.connect(self._browse_qwen_voice_model)
+        qwen_voice_row.addWidget(self.qwen_voice_model_edit, 1)
+        qwen_voice_row.addWidget(qwen_voice_browse_btn)
+        voice_form.addRow("Qwen Voice model path", qwen_voice_row)
+
+        self.asr_model_edit = QLineEdit(self.settings.asr_model_path)
+        voice_form.addRow("Fallback ASR model", self.asr_model_edit)
+
+        self.asr_language_edit = QLineEdit(self.settings.asr_language)
+        self.asr_language_edit.setPlaceholderText("Auto")
+        voice_form.addRow("Language", self.asr_language_edit)
+
+        self.asr_sample_rate_edit = QLineEdit(str(self.settings.asr_sample_rate))
+        voice_form.addRow("Sample rate", self.asr_sample_rate_edit)
+
+        self.asr_api_url_edit = QLineEdit(self.settings.asr_api_url)
+        voice_form.addRow("ASR API URL", self.asr_api_url_edit)
+
+        self.asr_api_key_edit = QLineEdit(self.settings.asr_api_key)
+        self.asr_api_key_edit.setEchoMode(QLineEdit.Password)
+        voice_form.addRow("ASR API key", self.asr_api_key_edit)
+
+        root.addWidget(voice_group)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
@@ -91,6 +126,19 @@ class ModelSettingsDialog(QDialog):
         if filename:
             self.gguf_path_edit.setText(filename)
 
+    def _browse_qwen_voice_model(self):
+        start_dir = ""
+        current = self.qwen_voice_model_edit.text().strip()
+        if current:
+            start_dir = str(Path(current).expanduser().parent)
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Qwen Voice Model Directory",
+            start_dir,
+        )
+        if folder:
+            self.qwen_voice_model_edit.setText(folder)
+
     def _save_and_accept(self):
         self.settings.backend = self.backend_combo.currentText().strip() or self.settings.backend
         self.settings.model_path = self.gguf_path_edit.text().strip()
@@ -99,6 +147,17 @@ class ModelSettingsDialog(QDialog):
         self.settings.openrouter_model = self.openrouter_model_edit.text().strip() or self.settings.openrouter_model
         self.settings.nvidia_api_key = self.nvidia_key_edit.text().strip()
         self.settings.nvidia_model = self.nvidia_model_edit.text().strip() or self.settings.nvidia_model
+        self.settings.asr_backend = self.asr_backend_combo.currentText().strip() or "local"
+        self.settings.qwen_voice_model_path = self.qwen_voice_model_edit.text().strip()
+        self.settings.asr_model_path = self.asr_model_edit.text().strip()
+        self.settings.asr_language = self.asr_language_edit.text().strip() or "Auto"
+        self.settings.asr_api_url = self.asr_api_url_edit.text().strip()
+        self.settings.asr_api_key = self.asr_api_key_edit.text().strip()
+        try:
+            self.settings.asr_sample_rate = max(8000, int(self.asr_sample_rate_edit.text().strip() or "16000"))
+        except ValueError:
+            QMessageBox.warning(self, "Invalid sample rate", "Sample rate must be a number (e.g. 16000).")
+            return
 
         needs_default_download = (
             self.settings.backend == "gguf"

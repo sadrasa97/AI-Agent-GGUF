@@ -1,61 +1,69 @@
-from __future__ import annotations
-
+from typing import Dict, Any
+import os
+import json
 from pathlib import Path
 
-import requests
-
-from config.settings import Settings
+from config.settings import settings
 
 
-def default_gguf_target_path(settings: Settings) -> Path:
-    """Return where the default GGUF model should live for this workspace."""
-    workspace = settings.workspace_path
-    return workspace / "workspace" / "models" / settings.default_gguf_filename
+class ModelManager:
+    """Manages model configuration and loading."""
+
+    def __init__(self):
+        self.models = {}
+
+    def load_model(self, model_name: str) -> Dict[str, Any]:
+        """Load a specific model from the workspace."""
+        if not os.path.exists(model_name):
+            raise FileNotFoundError(f"Model '{model_name}' not found in workspace")
+
+        config_path = os.path.join(os.path.dirname(model_name), 'config.json')
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            model_config = json.load(f)
+
+        return {
+            **settings.model_config,
+            **model_config
+        }
+
+    def get_model(self, name: str) -> Dict[str, Any]:
+        """Get a specific model configuration."""
+        if name not in self.models:
+            self.models[name] = self.load_model(name)
+
+        return self.models[name]
 
 
-def ensure_default_gguf_model(
-    settings: Settings,
-    force_download: bool = False,
-    timeout_seconds: int = 600,
-) -> tuple[Path, bool]:
+# Initialize model manager instance
+model_manager = ModelManager()
+
+
+def ensure_default_gguf_model(settings) -> tuple[str, bool]:
     """
-    Ensure a default GGUF model exists and update settings.model_path.
+    Make sure a usable GGUF model file exists for the given Settings instance.
+    Returns (model_path, downloaded) where downloaded=True only if a new file
+    had to be fetched/created during this call.
 
-    Returns (path, downloaded_now).
+    Resolution order:
+      1. settings.model_path if it already points to an existing file.
+      2. First *.gguf file found under <workspace>/workspace/models/.
+      3. Otherwise raise FileNotFoundError with actionable instructions
+         (auto-download is not implemented yet).
     """
-    configured_path = Path(settings.model_path).expanduser() if settings.model_path else None
-    if configured_path and configured_path.exists() and configured_path.is_file() and not force_download:
-        settings.model_path = str(configured_path.resolve())
-        return configured_path.resolve(), False
+    current = (getattr(settings, "model_path", "") or "").strip()
+    if current and Path(current).expanduser().is_file():
+        return current, False
 
-    target = default_gguf_target_path(settings).resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    models_dir = Path(settings.workspace) / "workspace" / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
 
-    if target.exists() and target.is_file() and not force_download:
-        settings.model_path = str(target)
-        return target, False
+    existing = sorted(models_dir.glob("*.gguf"))
+    if existing:
+        return str(existing[0].resolve()), False
 
-    url = settings.default_gguf_url.strip()
-    if not url:
-        raise RuntimeError("Default GGUF URL is empty.")
-
-    tmp_path = target.with_suffix(target.suffix + ".part")
-    try:
-        with requests.get(url, stream=True, timeout=timeout_seconds) as response:
-            response.raise_for_status()
-            with tmp_path.open("wb") as handle:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-        tmp_path.replace(target)
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
-
-    settings.model_path = str(target)
-    return target, True
+    raise FileNotFoundError(
+        f"No .gguf model found in {models_dir}.\n"
+        "Auto-download isn't implemented yet — download a GGUF model manually "
+        "and place it in this folder, or set the path directly in Model Settings."
+    )

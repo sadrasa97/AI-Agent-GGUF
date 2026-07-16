@@ -1,0 +1,53 @@
+{
+  "name": "ai-agent-starter-extension",
+  "displayName": "AI Agent Starter",
+  "description": "A starter VS Code extension with dashboard, diagnostics viewer, and logo.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiAgentStarter.openDashboard",
+        "title": "AI Agent Starter: Open Dashboard"
+      },
+      {
+        "command": "aiAgentStarter.showDiagnostics",
+        "title": "AI Agent Starter: Show Active File Diagnostics"
+      },
+      {
+        "command": "aiAgentStarter.insertBoilerplate",
+        "title": "AI Agent Starter: Insert TypeScript Boilerplate"
+      },
+      {
+        "command": "aiAgentStarter.createProjectWizard",
+        "title": "AI Agent Starter: Create Project (React/Node/Python)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "aiAgentStarter.showDiagnostics",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.2"
+  }
+}

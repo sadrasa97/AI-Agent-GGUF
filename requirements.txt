@@ -1,4 +1,13 @@
-PySide6>=6.6
-requests>=2.31
-llama-cpp-python>=0.2.79
-rich>=13.0
+# Python dependencies for the agent workspace
+# These are standard requirements that should be included in your project's requirements.txt
+
+requests>=2.31.0
+pyyaml>=6.0
+openpyxl>=3.1.0
+beautifulsoup4>=4.12.0
+python-dotenv>=1.0.0
+numpy>=1.26.0
+pandas>=2.0.0
+
+# Optional dependencies for the VS Code extension
+# These are typically included in the extension's package.json or tsconfig.json

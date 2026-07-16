@@ -3,6 +3,7 @@ Tools for extracting, saving, and running generated code.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -249,22 +250,53 @@ def list_workspace_files(
 ) -> list[Path]:
     files: list[Path] = []
     workspace = workspace.resolve()
-    for path in workspace.rglob("*"):
-        if len(files) >= max_files:
-            break
-        if not _safe_is_file(path):
-            continue
+
+    for root, dirs, filenames in os.walk(workspace, topdown=True):
+        root_path = Path(root)
         try:
-            rel = path.relative_to(workspace)
+            rel_root = root_path.relative_to(workspace)
+            depth = len(rel_root.parts)
         except ValueError:
             continue
-        if len(rel.parts) > max_depth:
+
+        if depth > max_depth:
+            dirs[:] = []
             continue
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        if any(part in IGNORED_DIRS for part in rel.parts):
-            continue
-        files.append(path)
+
+        pruned_dirs: list[str] = []
+        for d in dirs:
+            if d in IGNORED_DIRS:
+                continue
+            if d.startswith("."):
+                continue
+            if depth + 1 > max_depth:
+                continue
+            pruned_dirs.append(d)
+        dirs[:] = pruned_dirs
+
+        for name in filenames:
+            if len(files) >= max_files:
+                break
+            if name.startswith("."):
+                continue
+
+            path = root_path / name
+            if not _safe_is_file(path):
+                continue
+
+            try:
+                rel = path.relative_to(workspace)
+            except ValueError:
+                continue
+            if len(rel.parts) > max_depth:
+                continue
+            if any(part in IGNORED_DIRS for part in rel.parts):
+                continue
+            files.append(path)
+
+        if len(files) >= max_files:
+            break
+
     return sorted(files)
 
 

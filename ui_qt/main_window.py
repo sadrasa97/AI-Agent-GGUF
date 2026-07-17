@@ -177,6 +177,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self._last_generated_block: CodeBlock | None = None
+        # rel_path -> stack of previous file contents (None = file didn't exist
+        # before that edit), most recent edit last — used by the chat "Undo" button.
+        self._agent_undo_stacks: dict[str, list[str | None]] = {}
         if self.settings.ui_theme not in VALID_UI_THEMES:
             self.settings.ui_theme = "dark"
         self.setWindowTitle("Nova Code Agent — IDE")
@@ -213,6 +216,7 @@ class MainWindow(QMainWindow):
         self.chat_panel = ChatTabsPanel(self.settings, self._workspace_context_for_chat)
         self.chat_panel.codeBlockReady.connect(self._on_code_block_from_chat)
         self.chat_panel.agentFileEdit.connect(self._on_agent_file_edit)
+        self.chat_panel.agentUndoRequested.connect(self._on_agent_undo_requested)
         chat_dock = QDockWidget("CHAT", self)
         chat_dock.setWidget(self.chat_panel)
         chat_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -674,12 +678,25 @@ class MainWindow(QMainWindow):
             return
 
         is_new = not target.exists()
+        previous_content: str | None = None
+        if not is_new:
+            try:
+                previous_content = target.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                previous_content = None
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(code, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Agent Edit Failed", f"{target}:\n{exc}")
             return
+
+        try:
+            rel_key = target.relative_to(workspace_root).as_posix()
+        except ValueError:
+            rel_key = str(target)
+        # None sentinel means "file did not exist before this edit" so undo deletes it.
+        self._agent_undo_stacks.setdefault(rel_key, []).append(previous_content if not is_new else None)
 
         # refresh explorer so newly created files/folders show up
         self.explorer.model.setRootPath(str(self.settings.workspace_path))
@@ -706,6 +723,62 @@ class MainWindow(QMainWindow):
             rel_display = target
         verb = "Created" if is_new else "Updated"
         self.output_panel.output.appendPlainText(f"[agent] {verb}: {rel_display}")
+
+    def _on_agent_undo_requested(self, rel_paths: list):
+        """Revert one batch of agent-applied edits: restore each file's content
+        from just before that edit, or delete it if the edit had created it."""
+        workspace_root = self.settings.workspace_path.resolve()
+        reverted, missing = [], []
+
+        for rel_path in rel_paths:
+            stack = self._agent_undo_stacks.get(rel_path)
+            if not stack:
+                missing.append(rel_path)
+                continue
+            previous_content = stack.pop()
+            if not stack:
+                del self._agent_undo_stacks[rel_path]
+
+            try:
+                target = resolve_workspace_path(workspace_root, rel_path)
+            except ValueError:
+                missing.append(rel_path)
+                continue
+
+            try:
+                if previous_content is None:
+                    # file didn't exist before this edit — undo means delete it
+                    if target.exists():
+                        target.unlink()
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(previous_content, encoding="utf-8")
+            except Exception as exc:  # noqa: BLE001
+                self.output_panel.output.appendPlainText(f"[agent] undo failed for {rel_path}: {exc}")
+                continue
+
+            reverted.append(rel_path)
+
+            # reflect the revert in an already-open tab
+            for i in range(self.editor_tabs.count()):
+                page = self.editor_tabs.widget(i)
+                if page.editor.file_path == target:
+                    if previous_content is None:
+                        self.editor_tabs.removeTab(i)
+                    else:
+                        page.editor.setPlainText(previous_content)
+                        page.editor.mark_clean()
+                    break
+
+        self.explorer.model.setRootPath(str(self.settings.workspace_path))
+        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+
+        if reverted:
+            self.output_panel.output.appendPlainText(f"[agent] reverted: {', '.join(reverted)}")
+        if missing:
+            self.output_panel.output.appendPlainText(
+                f"[agent] nothing to undo for: {', '.join(missing)}"
+            )
 
     def _apply_generated_code_block(self, block: CodeBlock):
         options = [

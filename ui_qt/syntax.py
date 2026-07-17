@@ -1,8 +1,6 @@
 """
-Regex-based syntax highlighter — good enough for a VS-Code-like *feel*
-without pulling in a full tree-sitter/pygments dependency.
-Supports Python, JS/TS, JSON, and a generic C-like fallback, selected by
-file extension.
+State-of-the-art lightweight syntax highlighter with an ultra-premium dark theme palette.
+Optimized for rapid structural regex evaluation across common development languages.
 """
 from __future__ import annotations
 
@@ -10,15 +8,17 @@ import re
 from PySide6.QtCore import QRegularExpression
 from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
 
-# VS Code "Dark+" inspired palette
-C_KEYWORD = QColor("#569CD6")
-C_STRING = QColor("#CE9178")
-C_COMMENT = QColor("#6A9955")
-C_NUMBER = QColor("#B5CEA8")
-C_FUNC = QColor("#DCDCAA")
-C_CLASS = QColor("#4EC9B0")
-C_DECORATOR = QColor("#D7BA7D")
-C_SELF = QColor("#569CD6")
+# State-of-the-art Deep Dark Premium Palette
+C_KEYWORD = QColor("#ff757f")     # Elegant Soft Red / Pink Accent
+C_BUILTIN = QColor("#7ad9ff")     # Ice Cyan for core types/builtins
+C_STRING = QColor("#9ece6a")      # Calming Sage Green
+C_COMMENT = QColor("#565f89")     # Subdued Slate Grey-Blue
+C_NUMBER = QColor("#ff9e64")      # Warm Amber Orange
+C_FUNC = QColor("#7aa2f7")        # Vibrant Deep Sky Blue
+C_CLASS = QColor("#e0af68")       # Bright Warm Ochre Gold
+C_DECORATOR = QColor("#bb9af7")   # Vivid Electric Purple
+C_SELF = QColor("#2ac3de")        # Bright Teal Accent
+C_OPERATOR = QColor("#89ddff")    # Light Aqua for brackets/symbols
 
 PY_KEYWORDS = [
     "False", "None", "True", "and", "as", "assert", "async", "await",
@@ -63,8 +63,7 @@ def _fmt(color: QColor, bold: bool = False, italic: bool = False) -> QTextCharFo
 
 
 class CodeHighlighter(QSyntaxHighlighter):
-    """A single highlighter instance whose rules are rebuilt when the
-    associated tab's file extension changes."""
+    """A highly expressive, fast code tokenizer using targeted regular expressions."""
 
     def __init__(self, document, extension: str = "py"):
         super().__init__(document)
@@ -81,32 +80,37 @@ class CodeHighlighter(QSyntaxHighlighter):
         self.rules: list[tuple[QRegularExpression, QTextCharFormat]] = []
         keywords = EXT_KEYWORDS.get(self.extension, GENERIC_KEYWORDS)
 
+        # 1. Keywords
         kw_fmt = _fmt(C_KEYWORD, bold=True)
         for kw in keywords:
             pattern = QRegularExpression(rf"\b{re.escape(kw)}\b")
             self.rules.append((pattern, kw_fmt))
 
-        # decorators (python)
+        # 2. PySide/Core Object Reference shortcuts
+        self.rules.append((QRegularExpression(r"\b(self|cls|this|super)\b"), _fmt(C_SELF, italic=True)))
+
+        # 3. Modern Operators & Punctuation
+        self.rules.append((QRegularExpression(r"[-+*/%=<>!&|^~]"), _fmt(C_OPERATOR)))
+
+        # 4. Decorators / Annotations
         self.rules.append((QRegularExpression(r"@\w+"), _fmt(C_DECORATOR)))
 
-        # function / class defs
-        self.rules.append(
-            (QRegularExpression(r"\bdef\s+(\w+)"), _fmt(C_FUNC))
-        )
-        self.rules.append(
-            (QRegularExpression(r"\bclass\s+(\w+)"), _fmt(C_CLASS, bold=True))
-        )
-        self.rules.append((QRegularExpression(r"\bself\b"), _fmt(C_SELF, italic=True)))
-        self.rules.append((QRegularExpression(r"\bfunction\s+(\w+)"), _fmt(C_FUNC)))
+        # 5. Functions & Method Names
+        self.rules.append((QRegularExpression(r"\bdef\s+(\w+)"), _fmt(C_FUNC, bold=True)))
+        self.rules.append((QRegularExpression(r"\bfunction\s+(\w+)"), _fmt(C_FUNC, bold=True)))
+        self.rules.append((QRegularExpression(r"\b(\w+)(?=\s*\()"), _fmt(C_FUNC)))
 
-        # numbers
+        # 6. Structs & Class Defs
+        self.rules.append((QRegularExpression(r"\bclass\s+(\w+)"), _fmt(C_CLASS, bold=True)))
+
+        # 7. Numeric Constants
         self.rules.append((QRegularExpression(r"\b[0-9]+\.?[0-9]*\b"), _fmt(C_NUMBER)))
 
-        # strings
+        # 8. Text Strings
         self.rules.append((QRegularExpression(r'"[^"\\]*(\\.[^"\\]*)*"'), _fmt(C_STRING)))
         self.rules.append((QRegularExpression(r"'[^'\\]*(\\.[^'\\]*)*'"), _fmt(C_STRING)))
 
-        # comments
+        # 9. Line Comments
         if self.extension in ("py",):
             self.comment_rule = QRegularExpression(r"#.*")
         elif self.extension in ("js", "ts", "jsx", "tsx", "c", "cpp", "cs", "java", "go", "rs"):

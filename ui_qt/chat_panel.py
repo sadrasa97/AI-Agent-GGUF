@@ -2,17 +2,26 @@
 (GGUF / OpenRouter / NVIDIA) on a background QThread so the UI never
 blocks while tokens stream in.
 
-Layout mirrors GitHub Copilot Chat:
-  - the whole panel sits inside ONE bordered outer "chat box"
-  - inside it, every turn is its OWN separate card: a distinct box for
-    the user's question and a distinct box for the assistant's answer,
-    each with a small role avatar + name header, stacked top-to-bottom
-    in a scroll area.
+Design language: a modern, "state-of-the-art" agentic IDE assistant —
+think Copilot Chat / Cursor composer, pushed a notch further:
+  - a single glass-like bordered chat surface with a soft gradient
+    accent rail across the top
+  - every turn is its own elevated card with a gradient avatar,
+    role label, live timestamp and (for the assistant) a subtle
+    "typing" affordance while streaming
+  - fenced code blocks inside a message are detected and rendered as
+    their own dark "code card" with a language chip + copy button,
+    instead of being flattened into plain text
+  - a floating pill composer with gradient send button, animated
+    generating state, and compact icon actions
+  - a redesigned session tab strip with a live "session dot" and a
+    frosted "+ New chat" affordance
 """
 from __future__ import annotations
 
 import re
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -22,8 +31,9 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QComboBox, QFileDialog, QFrame, QScrollArea,
     QSizePolicy, QApplication, QTabWidget, QToolButton, QInputDialog,
-    QLineEdit,
+    QLineEdit, QGraphicsDropShadowEffect,
 )
+from PySide6.QtGui import QColor
 
 from config.settings import Settings
 from agent.providers import create_provider, ProviderError
@@ -38,6 +48,42 @@ from tools.voice_input import (
 MAX_ATTACHMENT_CHARS = 20_000
 MAX_TOOL_OUTPUT_CHARS = 12_000
 MAX_REGEX_MATCHES = 120
+
+
+# ---------------------------------------------------------------------------
+# Design tokens — a single palette shared by every widget in this module so
+# the whole panel reads as one cohesive, intentional surface.
+# ---------------------------------------------------------------------------
+class Theme:
+    app_bg = "#16171a"
+    panel_bg = "#1b1c20"
+    panel_border = "#2a2b30"
+    surface = "#212227"
+    surface_hover = "#282932"
+    surface_border = "#34353c"
+    divider = "#2a2b30"
+
+    text = "#eaeaef"
+    text_dim = "#9a9ba5"
+    text_faint = "#6c6d76"
+
+    accent_a = "#7c8cff"
+    accent_b = "#a78bfa"
+    accent_soft_bg = "#242645"
+    accent_soft_border = "#3a3d70"
+
+    danger = "#f4796b"
+    danger_bg = "#301f22"
+    danger_border = "#5a2f36"
+
+    success = "#7ee0a3"
+    warn = "#e6b673"
+
+    code_bg = "#111214"
+    code_border = "#2c2d33"
+
+
+ACCENT_GRADIENT = f"qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {Theme.accent_a}, stop:1 {Theme.accent_b})"
 
 
 class GenerationWorker(QObject):
@@ -127,75 +173,91 @@ class ChatInputBox(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+def _soft_shadow(blur=28, dy=6, alpha=110, color="#000000") -> QGraphicsDropShadowEffect:
+    eff = QGraphicsDropShadowEffect()
+    eff.setBlurRadius(blur)
+    eff.setOffset(0, dy)
+    c = QColor(color)
+    c.setAlpha(alpha)
+    eff.setColor(c)
+    return eff
+
+
 class ChatBubble(QFrame):
     """A single self-contained message card — either the user's question
-    or the assistant's answer — styled like a GitHub Copilot Chat turn:
-    round avatar + role name header, content below, own background/border.
-    Uses a word-wrapping QLabel for content so height always tracks the
-    text correctly (no manual height math needed).
+    or the assistant's answer — styled like a modern agent-chat turn:
+    gradient avatar + role name + timestamp, rich content below (with
+    fenced code rendered as its own code card), own background/border
+    and a soft drop shadow for a bit of depth.
     """
 
     ROLE_STYLES = {
         "user": {
-            "bg": "#20293a",
-            "border": "#2e4a73",
+            "bg": "#20232f",
+            "border": "#33395a",
             "label": "You",
-            "label_color": "#6fb3ff",
-            "avatar_bg": "#2e4a73",
+            "label_color": "#9db4ff",
+            "avatar_grad": "qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #4f6bff, stop:1 #7c8cff)",
             "avatar": "🧑",
         },
         "assistant": {
-            "bg": "#1f2620",
+            "bg": "#1c211d",
             "border": "#33472f",
             "label": "Assistant",
             "label_color": "#9bd39c",
-            "avatar_bg": "#33472f",
+            "avatar_grad": "qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #3d8b52, stop:1 #7ee0a3)",
             "avatar": "✨",
         },
         "error": {
-            "bg": "#2e1f20",
-            "border": "#5a2c2c",
+            "bg": Theme.danger_bg,
+            "border": Theme.danger_border,
             "label": "Error",
-            "label_color": "#f48771",
-            "avatar_bg": "#5a2c2c",
+            "label_color": Theme.danger,
+            "avatar_grad": "qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #7a2f2f, stop:1 #f4796b)",
             "avatar": "⚠",
         },
         "system": {
-            "bg": "#22242a",
-            "border": "#33353c",
+            "bg": "#1e1f27",
+            "border": "#33353f",
             "label": "Agent",
             "label_color": "#c9a6ff",
-            "avatar_bg": "#3a2f5c",
+            "avatar_grad": "qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #5b3fa0, stop:1 #a78bfa)",
             "avatar": "🛠",
         },
     }
 
+    CODE_FENCE_RE = re.compile(r"```(?P<lang>[a-zA-Z0-9+#_-]*)\n(?P<code>.*?)```", re.DOTALL)
+
+    retryRequested = Signal()
+
     def __init__(self, role: str, parent=None):
         super().__init__(parent)
         self.role = role
-        self._raw_html = ""
+        self._raw_text = ""
         self._copy_text = ""
         style = self.ROLE_STYLES.get(role, self.ROLE_STYLES["assistant"])
 
         self.setObjectName("bubble")
         self.setStyleSheet(
             f"#bubble {{ background:{style['bg']}; border:1px solid {style['border']}; "
-            f"border-radius:12px; }}"
+            f"border-radius:14px; }}"
         )
+        self.setGraphicsEffect(_soft_shadow(blur=22, dy=4, alpha=70))
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 10, 12, 12)
-        outer.setSpacing(6)
+        outer.setContentsMargins(13, 11, 13, 12)
+        outer.setSpacing(7)
 
         header = QHBoxLayout()
-        header.setSpacing(8)
+        header.setSpacing(9)
 
         avatar = QLabel(style["avatar"])
-        avatar.setFixedSize(22, 22)
+        avatar.setFixedSize(24, 24)
         avatar.setAlignment(Qt.AlignCenter)
         avatar.setStyleSheet(
-            f"background:{style['avatar_bg']}; border-radius:11px; font-size:12px; border:none;"
+            f"background:{style['avatar_grad']}; border-radius:12px; font-size:12px; "
+            f"border:none; color:white;"
         )
         header.addWidget(avatar)
 
@@ -205,46 +267,156 @@ class ChatBubble(QFrame):
             f"letter-spacing:0.3px; background:transparent; border:none;"
         )
         header.addWidget(role_label)
+
+        self.time_label = QLabel(datetime.now().strftime("%H:%M"))
+        self.time_label.setStyleSheet(
+            f"color:{Theme.text_faint}; font-size:10px; background:transparent; border:none;"
+        )
+        header.addWidget(self.time_label)
+
         header.addStretch()
 
         self.tag_label = QLabel("")
         self.tag_label.setStyleSheet(
-            "color:#e0af68; background:#3a2f13; border-radius:8px; padding:1px 8px; "
-            "font-size:10px; font-weight:600; border:none;"
+            "color:#e0af68; background:#3a2f13; border-radius:8px; padding:1px 9px; "
+            "font-size:10px; font-weight:700; letter-spacing:0.5px; border:none;"
         )
         self.tag_label.setVisible(False)
         header.addWidget(self.tag_label)
         outer.addLayout(header)
 
-        self.content = QLabel("")
-        self.content.setWordWrap(True)
-        self.content.setTextFormat(Qt.RichText)
-        self.content.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
-        self.content.setOpenExternalLinks(True)
-        self.content.setStyleSheet(
-            "QLabel { background:transparent; color:#e2e2e5; border:none; }"
-        )
-        content_font = QFont("Consolas, Menlo, monospace")
-        content_font.setPointSize(10)
-        self.content.setFont(content_font)
-        outer.addWidget(self.content)
+        # Content area holds a dynamic mix of QLabel (prose) and code-card
+        # frames (fenced code), stacked vertically so code gets its own
+        # visually distinct block instead of being crushed into plain text.
+        self.content_col = QVBoxLayout()
+        self.content_col.setContentsMargins(0, 0, 0, 0)
+        self.content_col.setSpacing(8)
+        outer.addLayout(self.content_col)
 
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 2, 0, 0)
-        footer.addStretch()
-        self.copy_btn = QPushButton("Copy")
+        self._prose_font = QFont("Consolas, Menlo, monospace")
+        self._prose_font.setPointSize(10)
+
+        self.footer = QHBoxLayout()
+        self.footer.setContentsMargins(0, 2, 0, 0)
+        self.footer.addStretch()
+
+        if role in ("assistant", "error"):
+            self.retry_btn = QPushButton("↻  Retry")
+            self.retry_btn.setCursor(Qt.PointingHandCursor)
+            self.retry_btn.setToolTip("Regenerate this response")
+            self.retry_btn.setStyleSheet(self._secondary_btn_qss())
+            self.retry_btn.clicked.connect(self.retryRequested.emit)
+            self.footer.addWidget(self.retry_btn)
+        else:
+            self.retry_btn = None
+
+        self.copy_btn = QPushButton("⧉  Copy")
         self.copy_btn.setVisible(False)
-        self.copy_btn.setToolTip("Copy response")
-        self.copy_btn.setStyleSheet(
-            "QPushButton { background:#232427; color:#c9c9cc; padding:3px 9px; border:1px solid #3a3b40; "
-            "border-radius:8px; font-size:10px; font-weight:600; }"
-            "QPushButton:hover { background:#2f3034; border:1px solid #4a4b52; }"
-            "QPushButton:pressed { background:#1e1f22; }"
-        )
+        self.copy_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_btn.setToolTip("Copy full response")
+        self.copy_btn.setStyleSheet(self._secondary_btn_qss())
         self.copy_btn.clicked.connect(self._copy_text_to_clipboard)
-        footer.addWidget(self.copy_btn)
-        outer.addLayout(footer)
+        self.footer.addWidget(self.copy_btn)
+        outer.addLayout(self.footer)
 
+    @staticmethod
+    def _secondary_btn_qss() -> str:
+        return (
+            f"QPushButton {{ background:{Theme.surface}; color:{Theme.text_dim}; padding:3px 10px; "
+            f"border:1px solid {Theme.surface_border}; border-radius:8px; font-size:10px; font-weight:600; }}"
+            f"QPushButton:hover {{ background:{Theme.surface_hover}; border:1px solid #4a4b52; color:{Theme.text}; }}"
+            f"QPushButton:pressed {{ background:#1e1f22; }}"
+        )
+
+    def add_footer_button(self, text: str, callback, danger: bool = False) -> QPushButton:
+        """Insert an extra action button (e.g. Undo) into this bubble's footer,
+        left of the Copy/Retry buttons."""
+        btn = QPushButton(text)
+        btn.setCursor(Qt.PointingHandCursor)
+        if danger:
+            btn.setStyleSheet(
+                f"QPushButton {{ background:{Theme.danger_bg}; color:{Theme.danger}; padding:3px 10px; "
+                f"border:1px solid {Theme.danger_border}; border-radius:8px; font-size:10px; font-weight:700; }}"
+                f"QPushButton:hover {{ background:#4a3131; color:#ff9b8c; }}"
+                f"QPushButton:disabled {{ background:{Theme.surface}; color:{Theme.text_faint}; border:1px solid {Theme.surface_border}; }}"
+            )
+        else:
+            btn.setStyleSheet(self._secondary_btn_qss())
+        btn.clicked.connect(callback)
+        self.footer.insertWidget(0, btn)
+        return btn
+
+        # single placeholder label used until real content streams in
+        self._placeholder = self._make_prose_label()
+        self.content_col.addWidget(self._placeholder)
+
+    # ------------------------------------------------------------------
+    def _make_prose_label(self) -> QLabel:
+        lbl = QLabel("")
+        lbl.setWordWrap(True)
+        lbl.setTextFormat(Qt.RichText)
+        lbl.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        lbl.setOpenExternalLinks(True)
+        lbl.setStyleSheet(f"QLabel {{ background:transparent; color:{Theme.text}; border:none; }}")
+        lbl.setFont(self._prose_font)
+        return lbl
+
+    def _clear_content_widgets(self):
+        while self.content_col.count():
+            item = self.content_col.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+    def _make_code_card(self, lang: str, code: str) -> QFrame:
+        card = QFrame()
+        card.setObjectName("codeCard")
+        card.setStyleSheet(
+            f"#codeCard {{ background:{Theme.code_bg}; border:1px solid {Theme.code_border}; "
+            f"border-radius:10px; }}"
+        )
+        v = QVBoxLayout(card)
+        v.setContentsMargins(10, 6, 10, 10)
+        v.setSpacing(4)
+
+        top = QHBoxLayout()
+        lang_chip = QLabel((lang or "text").upper())
+        lang_chip.setStyleSheet(
+            f"color:{Theme.accent_b}; background:{Theme.accent_soft_bg}; border:1px solid {Theme.accent_soft_border}; "
+            f"border-radius:6px; padding:1px 7px; font-size:9.5px; font-weight:700; letter-spacing:0.5px;"
+        )
+        top.addWidget(lang_chip)
+        top.addStretch()
+        copy_code_btn = QPushButton("⧉")
+        copy_code_btn.setCursor(Qt.PointingHandCursor)
+        copy_code_btn.setToolTip("Copy code block")
+        copy_code_btn.setFixedWidth(26)
+        copy_code_btn.setStyleSheet(
+            f"QPushButton {{ background:transparent; color:{Theme.text_dim}; border:none; font-size:12px; }}"
+            f"QPushButton:hover {{ color:{Theme.text}; }}"
+        )
+        copy_code_btn.clicked.connect(lambda _c=False, txt=code: self._copy_snippet(txt, copy_code_btn))
+        top.addWidget(copy_code_btn)
+        v.addLayout(top)
+
+        body = QLabel(self._escape(code.rstrip("\n")))
+        body.setWordWrap(False)
+        body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        body.setStyleSheet(f"QLabel {{ background:transparent; color:#d7dae0; border:none; }}")
+        code_font = QFont("Consolas, Menlo, monospace")
+        code_font.setPointSize(10)
+        body.setFont(code_font)
+        v.addWidget(body)
+        return card
+
+    @staticmethod
+    def _copy_snippet(text: str, button: QPushButton):
+        QApplication.clipboard().setText(text)
+        old = button.text()
+        button.setText("✓")
+        QTimer.singleShot(900, lambda: button.setText(old))
+
+    # ------------------------------------------------------------------
     def set_tag(self, text: str):
         if text:
             self.tag_label.setText(text)
@@ -253,25 +425,67 @@ class ChatBubble(QFrame):
             self.tag_label.setVisible(False)
 
     def set_html(self, html: str):
-        self._raw_html = html
-        self.content.setText(html if html else "&nbsp;")
+        """Set static (non-streaming) content. Detects fenced code blocks
+        in the *raw* text form and splits them into prose + code cards."""
+        self._raw_text = html
         self._copy_text = html.replace("<br/>", "\n").replace("<br>", "\n")
+        self._render_mixed_content(html)
+
+    def _render_mixed_content(self, html: str):
+        self._clear_content_widgets()
+        if not html:
+            lbl = self._make_prose_label()
+            lbl.setText("&nbsp;")
+            self.content_col.addWidget(lbl)
+            return
+
+        # html here already has <br/> in place of newlines for plain text;
+        # to detect fences we work against a text edition with \n restored.
+        text_form = html.replace("<br/>", "\n").replace("<br>", "\n")
+        pos = 0
+        found_any = False
+        for m in self.CODE_FENCE_RE.finditer(text_form):
+            found_any = True
+            before = text_form[pos:m.start()].strip("\n")
+            if before.strip():
+                lbl = self._make_prose_label()
+                lbl.setText(self._escape(before))
+                self.content_col.addWidget(lbl)
+            self.content_col.addWidget(self._make_code_card(m.group("lang"), m.group("code")))
+            pos = m.end()
+        remainder = text_form[pos:].strip("\n")
+        if remainder.strip() or not found_any:
+            lbl = self._make_prose_label()
+            lbl.setText(self._escape(remainder) if found_any else html)
+            self.content_col.addWidget(lbl)
 
     def append_plain(self, text: str):
+        """Streaming path: keep it fast/simple — plain escaped text into a
+        single growing label. Fence-aware re-render happens once streaming
+        finishes (via set_html on the final buffer from the caller)."""
         escaped = (
             text.replace("&", "&amp;")
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace("\n", "<br/>")
         )
-        self._raw_html += escaped
+        self._raw_text += escaped
         self._copy_text += text
-        self.content.setText(self._raw_html)
+        if self.content_col.count() != 1 or not isinstance(self.content_col.itemAt(0).widget(), QLabel):
+            self._clear_content_widgets()
+            self.content_col.addWidget(self._make_prose_label())
+        lbl = self.content_col.itemAt(0).widget()
+        lbl.setText(self._raw_text)
+
+    def finalize_stream(self):
+        """Call once streaming is complete to re-render with code cards."""
+        self._render_mixed_content(self._raw_text)
 
     def clear_content(self):
-        self._raw_html = ""
+        self._raw_text = ""
         self._copy_text = ""
-        self.content.setText("")
+        self._clear_content_widgets()
+        self.content_col.addWidget(self._make_prose_label())
 
     def set_copy_text(self, text: str):
         self._copy_text = text or ""
@@ -282,7 +496,23 @@ class ChatBubble(QFrame):
             return
         clipboard = QApplication.clipboard()
         clipboard.setText(self._copy_text)
-        self.copy_btn.setText("Copied")
+        self.copy_btn.setText("✓  Copied")
+        QTimer.singleShot(1200, lambda: self.copy_btn.setText("⧉  Copy"))
+
+    @staticmethod
+    def _escape(text: str) -> str:
+        return (
+            text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+        )
+
+
+SCROLLBAR_QSS = f"""
+QScrollBar:vertical {{ background:transparent; width:10px; margin:2px; }}
+QScrollBar::handle:vertical {{ background:#3a3b42; border-radius:5px; min-height:24px; }}
+QScrollBar::handle:vertical:hover {{ background:{Theme.accent_a}; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0px; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:none; }}
+"""
 
 
 class ChatPanel(QWidget):
@@ -290,6 +520,13 @@ class ChatPanel(QWidget):
 
     codeBlockReady = Signal(str, str)  # (language, code) — generic snippet, not tied to a file
     agentFileEdit = Signal(str, str, str)  # (relative_path, language, code) — Agent mode auto-apply
+    agentUndoRequested = Signal(list)  # list[str] of relative paths to revert, most-recent batch
+
+    MODE_META = {
+        "Agent": ("🤖", "Agent edits files directly in your workspace"),
+        "Chat": ("💬", "Ask questions, you choose how to apply code"),
+        "Plan": ("🧭", "Model drafts a step-by-step plan first"),
+    }
 
     def __init__(self, settings: Settings, get_workspace_context, parent=None):
         super().__init__(parent)
@@ -302,15 +539,19 @@ class ChatPanel(QWidget):
         self._voice_worker: Optional[VoiceTranscriptionWorker] = None
         self._response_buffer = ""
         self._attachments: list[Path] = []
-        self.mode = "Chat"  # "Chat", "Agent", or "Plan" — Agent is the default
+        self.mode = "Chat"  # "Chat", "Agent", or "Plan"
         self._current_assistant_bubble: Optional[ChatBubble] = None
         self._is_generating = False
         self._pending_tokens: list[str] = []
         self._stream_flush_timer = QTimer(self)
         self._stream_flush_timer.setInterval(35)
         self._stream_flush_timer.timeout.connect(self._flush_stream_tokens)
+        self._gen_dots_timer = QTimer(self)
+        self._gen_dots_timer.setInterval(420)
+        self._gen_dots_timer.timeout.connect(self._tick_generating_label)
+        self._gen_dots_phase = 0
 
-        self.setStyleSheet("background:#1a1b1e;")
+        self.setStyleSheet(f"background:{Theme.app_bg};")
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(10, 10, 10, 10)
@@ -320,25 +561,68 @@ class ChatPanel(QWidget):
         chat_box = QFrame()
         chat_box.setObjectName("chatBox")
         chat_box.setStyleSheet(
-            "#chatBox { background:#1e1f22; border:1px solid #2c2d31; border-radius:14px; }"
+            f"#chatBox {{ background:{Theme.panel_bg}; border:1px solid {Theme.panel_border}; border-radius:16px; }}"
         )
+        chat_box.setGraphicsEffect(_soft_shadow(blur=34, dy=8, alpha=130))
         outer_layout.addWidget(chat_box)
 
         layout = QVBoxLayout(chat_box)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(0)
+
+        # ---- gradient accent rail + header ----
+        accent_rail = QFrame()
+        accent_rail.setFixedHeight(3)
+        accent_rail.setStyleSheet(
+            f"background:{ACCENT_GRADIENT}; border-top-left-radius:16px; border-top-right-radius:16px;"
+        )
+        layout.addWidget(accent_rail)
 
         header = QHBoxLayout()
-        header.setContentsMargins(14, 10, 12, 4)
+        header.setContentsMargins(14, 10, 12, 8)
+        header.setSpacing(8)
+
+        title_dot = QLabel("●")
+        title_dot.setStyleSheet(f"color:{Theme.accent_a}; font-size:9px;")
+        header.addWidget(title_dot)
+
         title = QLabel("CHAT")
-        title.setStyleSheet("color:#9a9ba1; font-weight:600; font-size:11px; letter-spacing:1.5px;")
+        title.setStyleSheet(
+            f"color:{Theme.text_dim}; font-weight:700; font-size:11px; letter-spacing:1.8px; background:transparent;"
+        )
         header.addWidget(title)
+
+        self.mode_badge = QLabel()
+        self.mode_badge.setStyleSheet(
+            f"color:{Theme.accent_b}; background:{Theme.accent_soft_bg}; border:1px solid {Theme.accent_soft_border}; "
+            f"border-radius:8px; padding:2px 9px; font-size:10px; font-weight:700;"
+        )
+        header.addWidget(self.mode_badge)
+
         header.addStretch()
+
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet(
+            f"color:{Theme.text_faint}; font-size:10.5px; background:transparent;"
+        )
+        header.addWidget(self.status_label)
+
+        self.clear_btn = QToolButton()
+        self.clear_btn.setText("⟲")
+        self.clear_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_btn.setToolTip("Clear this chat session")
+        self.clear_btn.setStyleSheet(
+            f"QToolButton {{ color:{Theme.text_dim}; background:transparent; border:none; font-size:13px; padding:2px 4px; }}"
+            f"QToolButton:hover {{ color:{Theme.text}; }}"
+        )
+        self.clear_btn.clicked.connect(self.clear_history)
+        header.addWidget(self.clear_btn)
+
         layout.addLayout(header)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("background:#2c2d31; max-height:1px; border:none;")
+        sep.setStyleSheet(f"background:{Theme.divider}; max-height:1px; border:none;")
         layout.addWidget(sep)
 
         # ---- scrollable message list — each turn its own card ----
@@ -346,13 +630,17 @@ class ChatPanel(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setStyleSheet("QScrollArea { background:transparent; border:none; }")
+        self.scroll.setStyleSheet(f"QScrollArea {{ background:transparent; border:none; }} {SCROLLBAR_QSS}")
 
         self.messages_container = QWidget()
         self.messages_container.setStyleSheet("background:transparent;")
         self.messages_layout = QVBoxLayout(self.messages_container)
-        self.messages_layout.setContentsMargins(12, 8, 12, 8)
-        self.messages_layout.setSpacing(10)
+        self.messages_layout.setContentsMargins(12, 10, 12, 8)
+        self.messages_layout.setSpacing(11)
+
+        # ---- empty-state hero shown before the first message ----
+        self.empty_state = self._build_empty_state()
+        self.messages_layout.addWidget(self.empty_state)
         self.messages_layout.addStretch(1)
 
         self.scroll.setWidget(self.messages_container)
@@ -368,32 +656,36 @@ class ChatPanel(QWidget):
         attachments_wrap.setLayout(self.attachments_row)
         layout.addWidget(attachments_wrap)
 
-        # ---- composer: rounded "pill" input card, VS-Code-agent style ----
-        composer = QWidget()
-        composer.setObjectName("composer")
-        composer.setStyleSheet(
-            "#composer { background:#2b2d31; border:1px solid #38393e; border-radius:14px; }"
-        )
-        composer_layout = QVBoxLayout(composer)
-        composer_layout.setContentsMargins(10, 8, 10, 8)
-        composer_layout.setSpacing(6)
+        # ---- composer: rounded "pill" input card, agent-style ----
+        self.composer = QWidget()
+        self.composer.setObjectName("composer")
+        self._apply_composer_style(focused=False)
+        composer_layout = QVBoxLayout(self.composer)
+        composer_layout.setContentsMargins(11, 9, 11, 9)
+        composer_layout.setSpacing(7)
 
         self.input_box = ChatInputBox()
         self.input_box.setFixedHeight(64)
-        self.input_box.setPlaceholderText("Ask the model to write/explain/fix code…  (Enter to send, Shift+Enter new line)")
+        self.input_box.setPlaceholderText(
+            "Ask the model to write/explain/fix code…  (Enter to send, Shift+Enter new line)"
+        )
         self.input_box.setToolTip(
             "Optional tool directives in your message:\n"
             "  /regex <pattern>  -> search workspace with Python regex\n"
             "  /ps <command>     -> run PowerShell command in workspace"
         )
         self.input_box.setStyleSheet(
-            "QPlainTextEdit { background:transparent; color:#eee; border:none; padding:2px; }"
+            f"QPlainTextEdit {{ background:transparent; color:{Theme.text}; border:none; padding:2px; "
+            f"selection-background-color:{Theme.accent_soft_border}; }}"
         )
+        input_font = QFont("Segoe UI, Consolas, sans-serif")
+        input_font.setPointSize(10)
+        self.input_box.setFont(input_font)
         self.input_box.submitRequested.connect(self._on_send_or_stop)
         composer_layout.addWidget(self.input_box)
 
         composer_btn_row = QHBoxLayout()
-        composer_btn_row.setSpacing(5)
+        composer_btn_row.setSpacing(6)
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Agent", "Chat", "Plan"])
@@ -424,7 +716,8 @@ class ChatPanel(QWidget):
 
         composer_btn_row.addStretch()
 
-        self.send_btn = QPushButton("➤")
+        self.send_btn = QPushButton("➤  Send")
+        self.send_btn.setCursor(Qt.PointingHandCursor)
         self.send_btn.setToolTip("Send (Enter)")
         self.send_btn.clicked.connect(self._on_send_or_stop)
         composer_btn_row.addWidget(self.send_btn)
@@ -432,36 +725,110 @@ class ChatPanel(QWidget):
 
         # ---- small, pill-shaped, understated buttons/pickers ----
         combo_style = (
-            "QComboBox { background:#232427; color:#c9c9cc; padding:3px 8px; border:1px solid #38393e; "
-            "border-radius:9px; font-size:10.5px; font-weight:600; min-height:18px; }"
-            "QComboBox:hover { background:#2a2b30; border:1px solid #47484d; }"
-            "QComboBox::drop-down { border:none; width:14px; }"
-            "QComboBox QAbstractItemView { background:#232427; color:#ddd; selection-background-color:#3a3b40; "
-            "border:1px solid #38393e; outline:none; }"
+            f"QComboBox {{ background:{Theme.surface}; color:{Theme.text_dim}; padding:3px 9px; "
+            f"border:1px solid {Theme.surface_border}; border-radius:9px; font-size:10.5px; font-weight:600; min-height:18px; }}"
+            f"QComboBox:hover {{ background:{Theme.surface_hover}; border:1px solid #4a4b52; color:{Theme.text}; }}"
+            f"QComboBox::drop-down {{ border:none; width:16px; }}"
+            f"QComboBox QAbstractItemView {{ background:{Theme.surface}; color:#ddd; selection-background-color:#3a3b40; "
+            f"border:1px solid {Theme.surface_border}; outline:none; }}"
         )
         self.mode_combo.setStyleSheet(combo_style)
         self.backend_combo.setStyleSheet(combo_style)
 
         icon_btn_style = (
-            "QPushButton { background:#232427; color:#c9c9cc; padding:4px 7px; border:1px solid #38393e; "
-            "border-radius:9px; font-size:11px; min-width:14px; }"
-            "QPushButton:hover { background:#2f3034; border:1px solid #47484d; }"
-            "QPushButton:pressed { background:#1e1f22; }"
+            f"QPushButton {{ background:{Theme.surface}; color:{Theme.text_dim}; padding:4px 8px; "
+            f"border:1px solid {Theme.surface_border}; border-radius:9px; font-size:12px; min-width:14px; }}"
+            f"QPushButton:hover {{ background:{Theme.surface_hover}; border:1px solid #4a4b52; color:{Theme.text}; }}"
+            f"QPushButton:pressed {{ background:#1e1f22; }}"
         )
         self.attach_btn.setStyleSheet(icon_btn_style)
         self.voice_btn.setStyleSheet(icon_btn_style)
-        self.send_btn.setStyleSheet(
-            "QPushButton { background:#6c8cff; color:white; padding:4px 12px; border:none; "
-            "border-radius:9px; font-weight:700; font-size:12px; min-width:22px; }"
-            "QPushButton:hover { background:#7d9aff; }"
-            "QPushButton:pressed { background:#5b78e0; }"
-            "QPushButton:disabled { background:#33343a; color:#6a6a6e; }"
-        )
+        self._style_send_button(generating=False)
+
+        self.input_box.installEventFilter(self)
 
         outer_composer_row = QHBoxLayout()
-        outer_composer_row.setContentsMargins(12, 0, 12, 10)
-        outer_composer_row.addWidget(composer)
+        outer_composer_row.setContentsMargins(12, 0, 12, 12)
+        outer_composer_row.addWidget(self.composer)
         layout.addLayout(outer_composer_row)
+
+        self._update_mode_badge()
+
+    # ------------------------------------------------------------------
+    # Cosmetic helpers
+    # ------------------------------------------------------------------
+    def _build_empty_state(self) -> QWidget:
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(20, 46, 20, 30)
+        v.setSpacing(6)
+        v.setAlignment(Qt.AlignHCenter)
+
+        badge = QLabel("✨")
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setFixedSize(52, 52)
+        badge.setStyleSheet(
+            f"background:{ACCENT_GRADIENT}; border-radius:26px; font-size:22px; color:white;"
+        )
+        v.addWidget(badge, alignment=Qt.AlignHCenter)
+
+        heading = QLabel("Ready when you are")
+        heading.setAlignment(Qt.AlignCenter)
+        heading.setStyleSheet(f"color:{Theme.text}; font-size:14px; font-weight:700; background:transparent;")
+        v.addWidget(heading)
+
+        sub = QLabel("Ask a question, request a fix, or describe a feature.\nSwitch modes below to control how changes are applied.")
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setWordWrap(True)
+        sub.setStyleSheet(f"color:{Theme.text_faint}; font-size:11px; background:transparent;")
+        v.addWidget(sub)
+        return wrap
+
+    def _apply_composer_style(self, focused: bool):
+        border = Theme.accent_a if focused else Theme.surface_border
+        self.composer.setStyleSheet(
+            f"#composer {{ background:{Theme.surface}; border:1.5px solid {border}; border-radius:16px; }}"
+        )
+
+    def eventFilter(self, obj, event):
+        if obj is self.input_box:
+            if event.type() == event.Type.FocusIn:
+                self._apply_composer_style(True)
+            elif event.type() == event.Type.FocusOut:
+                self._apply_composer_style(False)
+        return super().eventFilter(obj, event)
+
+    def _update_mode_badge(self):
+        icon, tip = self.MODE_META.get(self.mode, ("💬", ""))
+        self.mode_badge.setText(f"{icon} {self.mode.upper()}")
+        self.mode_badge.setToolTip(tip)
+
+    def _style_send_button(self, generating: bool):
+        if generating:
+            self.send_btn.setText("■  Stop")
+            self.send_btn.setToolTip("Stop generation")
+            self.send_btn.setStyleSheet(
+                f"QPushButton {{ background:{Theme.danger_bg}; color:{Theme.danger}; padding:5px 14px; "
+                f"border:1px solid {Theme.danger_border}; border-radius:10px; font-size:11.5px; font-weight:700; }}"
+                f"QPushButton:hover {{ background:#4a3131; color:#ff9b8c; border:1px solid #6a4040; }}"
+                f"QPushButton:pressed {{ background:#2f2121; }}"
+            )
+            return
+        self.send_btn.setText("➤  Send")
+        self.send_btn.setToolTip("Send (Enter)")
+        self.send_btn.setStyleSheet(
+            f"QPushButton {{ background:{ACCENT_GRADIENT}; color:white; padding:5px 16px; border:none; "
+            f"border-radius:10px; font-weight:700; font-size:11.5px; min-width:26px; }}"
+            f"QPushButton:hover {{ background:{Theme.accent_a}; }}"
+            f"QPushButton:pressed {{ background:#5b78e0; }}"
+            f"QPushButton:disabled {{ background:#33343a; color:#6a6a6e; }}"
+        )
+
+    def _tick_generating_label(self):
+        dots = "." * ((self._gen_dots_phase % 3) + 1)
+        self._gen_dots_phase += 1
+        self.status_label.setText(f"Generating{dots}")
 
     # ------------------------------------------------------------------
     def _on_backend_changed(self, text: str):
@@ -476,24 +843,14 @@ class ChatPanel(QWidget):
 
     def _set_generation_state(self, generating: bool):
         self._is_generating = generating
+        self._style_send_button(generating)
         if generating:
-            self.send_btn.setText("Stop")
-            self.send_btn.setToolTip("Stop generation")
-            self.send_btn.setStyleSheet(
-                "QPushButton { background:#3a2c2c; color:#f48771; padding:4px 12px; border:1px solid #5a3535; "
-                "border-radius:9px; font-size:11px; font-weight:700; }"
-                "QPushButton:hover { background:#4a3131; color:#ff9b8c; border:1px solid #6a4040; }"
-                "QPushButton:pressed { background:#2f2121; }"
-            )
-            return
-        self.send_btn.setText("➤")
-        self.send_btn.setToolTip("Send (Enter)")
-        self.send_btn.setStyleSheet(
-            "QPushButton { background:#6c8cff; color:white; padding:4px 12px; border:none; "
-            "border-radius:9px; font-weight:700; font-size:12px; min-width:22px; }"
-            "QPushButton:hover { background:#7d9aff; }"
-            "QPushButton:pressed { background:#5b78e0; }"
-        )
+            self._gen_dots_phase = 0
+            self._gen_dots_timer.start()
+            self._tick_generating_label()
+        else:
+            self._gen_dots_timer.stop()
+            self.status_label.setText("Ready")
 
     def _on_mode_changed(self, text: str):
         self.mode = text
@@ -504,14 +861,16 @@ class ChatPanel(QWidget):
         else:
             placeholder = "Ask the model to write/explain/fix code…  (Enter to send, Shift+Enter new line)"
         self.input_box.setPlaceholderText(placeholder)
+        self._update_mode_badge()
 
     def clear_history(self):
         self.history.clear()
-        while self.messages_layout.count() > 1:  # keep trailing stretch
+        while self.messages_layout.count() > 2:  # keep empty-state + trailing stretch
             item = self.messages_layout.takeAt(0)
             w = item.widget()
-            if w:
+            if w and w is not self.empty_state:
                 w.deleteLater()
+        self.empty_state.setVisible(True)
         self._current_assistant_bubble = None
 
     def _toggle_voice_recording(self):
@@ -533,10 +892,10 @@ class ChatPanel(QWidget):
         self.voice_btn.setText("■")
         self.voice_btn.setToolTip("Stop recording")
         self.voice_btn.setStyleSheet(
-            "QPushButton { background:#3a2c2c; color:#f48771; padding:4px 7px; border:1px solid #5a3535; "
-            "border-radius:9px; font-size:11px; min-width:14px; }"
-            "QPushButton:hover { background:#4a3131; color:#ff9b8c; border:1px solid #6a4040; }"
-            "QPushButton:pressed { background:#2f2121; }"
+            f"QPushButton {{ background:{Theme.danger_bg}; color:{Theme.danger}; padding:4px 8px; "
+            f"border:1px solid {Theme.danger_border}; border-radius:9px; font-size:12px; min-width:14px; }}"
+            f"QPushButton:hover {{ background:#4a3131; color:#ff9b8c; border:1px solid #6a4040; }}"
+            f"QPushButton:pressed {{ background:#2f2121; }}"
         )
         self._voice_thread.start()
 
@@ -573,16 +932,17 @@ class ChatPanel(QWidget):
         self.voice_btn.setText("🎤")
         self.voice_btn.setToolTip("Record voice (click again to stop and transcribe)")
         self.voice_btn.setStyleSheet(
-            "QPushButton { background:#232427; color:#c9c9cc; padding:4px 7px; border:1px solid #38393e; "
-            "border-radius:9px; font-size:11px; min-width:14px; }"
-            "QPushButton:hover { background:#2f3034; border:1px solid #47484d; }"
-            "QPushButton:pressed { background:#1e1f22; }"
+            f"QPushButton {{ background:{Theme.surface}; color:{Theme.text_dim}; padding:4px 8px; "
+            f"border:1px solid {Theme.surface_border}; border-radius:9px; font-size:12px; min-width:14px; }}"
+            f"QPushButton:hover {{ background:{Theme.surface_hover}; border:1px solid #4a4b52; color:{Theme.text}; }}"
+            f"QPushButton:pressed {{ background:#1e1f22; }}"
         )
 
     # ------------------------------------------------------------------
     # Bubble management
     # ------------------------------------------------------------------
     def _add_bubble(self, role: str) -> ChatBubble:
+        self.empty_state.setVisible(False)
         bubble = ChatBubble(role)
         # insert before the trailing stretch item so new cards stack downward
         self.messages_layout.insertWidget(self.messages_layout.count() - 1, bubble)
@@ -619,11 +979,12 @@ class ChatPanel(QWidget):
 
         for path in self._attachments:
             chip = QPushButton(f"📄 {path.name}  ✕")
+            chip.setCursor(Qt.PointingHandCursor)
             chip.setToolTip(str(path))
             chip.setStyleSheet(
-                "QPushButton { background:#232427; color:#c9c9cc; padding:3px 10px; "
-                "border:1px solid #38393e; border-radius:10px; font-size:11px; }"
-                "QPushButton:hover { background:#3a2c2c; color:#f48771; }"
+                f"QPushButton {{ background:{Theme.surface}; color:{Theme.text_dim}; padding:3px 10px; "
+                f"border:1px solid {Theme.surface_border}; border-radius:10px; font-size:11px; }}"
+                f"QPushButton:hover {{ background:{Theme.danger_bg}; color:{Theme.danger}; border:1px solid {Theme.danger_border}; }}"
             )
             chip.clicked.connect(lambda _checked=False, p=path: self._remove_attachment(p))
             self.attachments_row.insertWidget(self.attachments_row.count() - 1, chip)
@@ -792,7 +1153,7 @@ class ChatPanel(QWidget):
         display_text = self._escape(text)
         if attachment_names:
             chips_html = " ".join(
-                f"<span style='background:#232427;color:#c9c9cc;border-radius:8px;"
+                f"<span style='background:{Theme.surface};color:{Theme.text_dim};border-radius:8px;"
                 f"padding:1px 8px;margin-right:4px;font-size:11px;'>📄 {self._escape(name)}</span>"
                 for name in attachment_names
             )
@@ -809,9 +1170,18 @@ class ChatPanel(QWidget):
             user_bubble.set_tag("AGENT")
         user_bubble.set_html(display_text)
 
+        self._start_generation()
+
+    def _start_generation(self):
+        """Kick off a GenerationWorker against the current self.history.
+        Shared by send_message() (fresh turn) and retry_last() (regenerate)."""
+        if self._thread is not None:
+            return
+
         # --- assistant reply: a separate, empty card that streams in ---
         assistant_bubble = self._add_bubble("assistant")
-        assistant_bubble.set_html("<i style='color:#7a7b80;'>Thinking…</i>")
+        assistant_bubble.set_html(f"<i style='color:{Theme.text_faint};'>Thinking…</i>")
+        assistant_bubble.retryRequested.connect(lambda b=assistant_bubble: self.retry_last(b))
         self._current_assistant_bubble = assistant_bubble
 
         self._scroll_to_bottom()
@@ -829,6 +1199,30 @@ class ChatPanel(QWidget):
         self._thread.start()
 
         self._set_generation_state(True)
+
+    def retry_last(self, bubble: "ChatBubble"):
+        """Regenerate a response: drop the given bubble (and, if it corresponds
+        to the most recent assistant turn, its entry in history) and re-run
+        generation against the same prompt/history."""
+        if self._thread is not None:
+            return  # already generating, ignore double-clicks
+
+        if self.history and self.history[-1].get("role") == "assistant":
+            self.history.pop()
+
+        idx = self.messages_layout.indexOf(bubble)
+        if idx != -1:
+            self.messages_layout.takeAt(idx)
+        bubble.deleteLater()
+        if self._current_assistant_bubble is bubble:
+            self._current_assistant_bubble = None
+
+        self._start_generation()
+
+    def _undo_applied(self, paths: list[str], button: QPushButton):
+        button.setEnabled(False)
+        button.setText("Reverted")
+        self.agentUndoRequested.emit(paths)
 
     def stop_generation(self):
         if self._worker:
@@ -874,6 +1268,7 @@ class ChatPanel(QWidget):
             self.history.append({"role": "assistant", "content": self._response_buffer})
             if self._current_assistant_bubble is not None:
                 self._current_assistant_bubble.set_copy_text(self._response_buffer)
+                self._current_assistant_bubble.finalize_stream()
             blocks = self._extract_code_blocks(self._response_buffer)
             applied_paths: list[str] = []
             for lang, code, path in blocks:
@@ -884,12 +1279,17 @@ class ChatPanel(QWidget):
                     self.codeBlockReady.emit(lang, code)
             if applied_paths:
                 chips = " ".join(
-                    f"<span style='background:#2b2440;color:#c9a6ff;border-radius:8px;"
+                    f"<span style='background:{Theme.accent_soft_bg};color:{Theme.accent_b};border-radius:8px;"
                     f"padding:1px 8px;margin-right:4px;font-size:11px;'>📝 {self._escape(p)}</span>"
                     for p in applied_paths
                 )
                 status_bubble = self._add_bubble("system")
                 status_bubble.set_html(f"Applied changes to:<br/>{chips}")
+                undo_btn = status_bubble.add_footer_button("↩  Undo", lambda: None, danger=True)
+                undo_btn.clicked.disconnect()
+                undo_btn.clicked.connect(
+                    lambda _c=False, paths=list(applied_paths), b=undo_btn: self._undo_applied(paths, b)
+                )
         elif self._current_assistant_bubble is not None:
             # no tokens ever arrived and no error was raised — drop the empty card
             idx = self.messages_layout.indexOf(self._current_assistant_bubble)
@@ -929,7 +1329,9 @@ class ChatPanel(QWidget):
 
 class ChatTabsPanel(QWidget):
     """Hosts multiple independent ChatPanel sessions in a tabbed strip
-    above the chat area (VS-Code-Copilot-Chat style 'new session' tabs).
+    above the chat area (agent-style 'new session' tabs), restyled with
+    a slightly more premium tab bar (accent underline, live dot, frosted
+    '+ New chat' affordance).
 
     Each tab owns its own ChatPanel instance, which means its own
     `history` list, its own GenerationWorker/QThread, its own attachments,
@@ -940,6 +1342,7 @@ class ChatTabsPanel(QWidget):
 
     codeBlockReady = Signal(str, str)              # (language, code) — from active session
     agentFileEdit = Signal(str, str, str)           # (relative_path, language, code) — from any session
+    agentUndoRequested = Signal(list)               # list[str] relative paths — from any session
 
     def __init__(self, settings: Settings, get_workspace_context, parent=None):
         super().__init__(parent)
@@ -950,6 +1353,7 @@ class ChatTabsPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        self.setStyleSheet(f"background:{Theme.app_bg};")
 
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
@@ -958,25 +1362,27 @@ class ChatTabsPanel(QWidget):
         self.tabs.tabCloseRequested.connect(self._close_tab)
         self.tabs.tabBarDoubleClicked.connect(self._rename_tab)
         self.tabs.setStyleSheet(
-            "QTabWidget::pane { border:none; top:0px; }"
-            "QTabBar { background:#1a1b1e; }"
-            "QTabBar::tab { background:#232427; color:#9a9ba1; padding:6px 14px; "
-            "margin-right:2px; border-top-left-radius:8px; border-top-right-radius:8px; "
-            "font-size:11px; font-weight:600; }"
-            "QTabBar::tab:selected { background:#2b2d31; color:#eaeaea; }"
-            "QTabBar::tab:hover { background:#2a2b30; }"
-            "QTabBar::close-button { subcontrol-position: right; }"
+            f"QTabWidget::pane {{ border:none; top:0px; }}"
+            f"QTabBar {{ background:{Theme.app_bg}; }}"
+            f"QTabBar::tab {{ background:{Theme.surface}; color:{Theme.text_dim}; padding:7px 16px; "
+            f"margin:4px 3px 0px 3px; border-top-left-radius:9px; border-top-right-radius:9px; "
+            f"font-size:11px; font-weight:600; border:1px solid transparent; }}"
+            f"QTabBar::tab:selected {{ background:{Theme.panel_bg}; color:{Theme.text}; "
+            f"border:1px solid {Theme.panel_border}; border-bottom:2px solid {Theme.accent_a}; }}"
+            f"QTabBar::tab:hover {{ background:{Theme.surface_hover}; color:{Theme.text}; }}"
+            f"QTabBar::close-button {{ subcontrol-position: right; }}"
         )
         layout.addWidget(self.tabs, stretch=1)
 
         # "+ New chat" button pinned to the tab bar's corner.
         new_tab_btn = QToolButton()
-        new_tab_btn.setText("+")
+        new_tab_btn.setText("＋ New")
+        new_tab_btn.setCursor(Qt.PointingHandCursor)
         new_tab_btn.setToolTip("New chat session (Ctrl+T)")
         new_tab_btn.setStyleSheet(
-            "QToolButton { background:#232427; color:#c9c9cc; border:none; "
-            "border-radius:6px; padding:2px 10px; font-weight:700; font-size:13px; margin:3px; }"
-            "QToolButton:hover { background:#2f3034; }"
+            f"QToolButton {{ background:{ACCENT_GRADIENT}; color:white; border:none; "
+            f"border-radius:8px; padding:4px 12px; font-weight:700; font-size:11px; margin:5px; }}"
+            f"QToolButton:hover {{ background:{Theme.accent_a}; }}"
         )
         new_tab_btn.clicked.connect(lambda: self.add_new_tab())
         self.tabs.setCornerWidget(new_tab_btn, Qt.TopRightCorner)
@@ -989,6 +1395,7 @@ class ChatTabsPanel(QWidget):
         panel = ChatPanel(self.settings, self.get_workspace_context)
         panel.codeBlockReady.connect(self.codeBlockReady.emit)
         panel.agentFileEdit.connect(self.agentFileEdit.emit)
+        panel.agentUndoRequested.connect(self.agentUndoRequested.emit)
 
         label = title or f"Chat {self._session_counter}"
         index = self.tabs.addTab(panel, label)

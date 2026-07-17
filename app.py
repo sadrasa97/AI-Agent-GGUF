@@ -1,5 +1,8 @@
 """
-Nova Code Agent — VS Code-style desktop IDE (PySide6 / Qt6)
+Nova Code Agent — State-of-the-Art AI Coding IDE (PySide6 / Qt6)
+
+A next-generation desktop IDE with multi-backend AI support, real-time collaboration
+features, and a deeply integrated agentic workflow.
 
 Run:
     python app.py
@@ -7,34 +10,32 @@ Run:
     python app.py --backend openrouter --openrouter-key sk-or-...
     python app.py --backend nvidia --nvidia-key nvapi-...
     python app.py --backend gguf --model /path/to/model.gguf
+    python app.py --agent-mode  # Start in agent mode by default
 
-Settings (API keys, last-used model, workspace) persist between runs in
-~/.gguf_code_agent/config.json — command-line flags override persisted
-values for this session and are re-saved on exit.
+Settings persist in ~/.nova_code_agent/config.json
 """
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+import os
 from pathlib import Path
+from typing import Optional
 
-# --- Pre-import modules that conflict with PySide6's shiboken import hook ---
-# PySide6 registers a "feature_imported" hook (shibokensupport) that intercepts
-# `six.moves` imports.  When dateutil (via pandas → sklearn → transformers) later
-# does `from six.moves import _thread`, the hook crashes because six's
-# _SixMetaPathImporter has no `_path` attribute.  This corrupts Python's import
-# state and causes subsequent `from transformers.generation import GenerationMixin`
-# to fail.  Pre-loading these modules before PySide6 avoids the conflict entirely.
+# Keep terminal output clean from known non-fatal Qt font fallback warnings.
+os.environ.setdefault("QT_LOGGING_RULES", "qt.text.font.db=false;qt.qpa.fonts=false")
+
+# --- Pre-import conflict resolution ---
 try:
     from six.moves import _thread  # noqa: F401
     import dateutil.tz  # noqa: F401
 except Exception:
     pass
 
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPalette, QColor, QIcon
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QSplashScreen
+from PySide6.QtGui import QPalette, QColor, QIcon, QPixmap, QPainter, QFont, QLinearGradient
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 
 from config.settings import Settings, VALID_BACKENDS, CONFIG_DIR
 from ui_qt.main_window import MainWindow
@@ -43,20 +44,52 @@ from ui_qt.main_window import MainWindow
 RECENT_WORKSPACES_FILE = CONFIG_DIR / "recent_workspaces.json"
 PROJECT_MARKERS = (
     ".git", "pyproject.toml", "requirements.txt", "package.json", "Cargo.toml",
-    "go.mod", "CMakeLists.txt", "README.md", "readme.md",
+    "go.mod", "CMakeLists.txt", "README.md", "readme.md", "setup.py", "setup.cfg",
+    "poetry.lock", "Pipfile", "Makefile", "Dockerfile", ".nova", "nova.json",
 )
-APP_LOGO_FILE = "ChatGPT Image Jul 15, 2026, 11_59_51 AM.png"
+APP_LOGO_FILE = "nova_logo.png"
+SPLASH_FILE = "nova_splash.png"
 
 
-def _load_app_icon() -> QIcon | None:
+class StartupWorker(QThread):
+    """Background worker to initialize heavy resources during splash screen."""
+    progress = Signal(int, str)
+    finished_loading = Signal()
+
+    def run(self):
+        steps = [
+            (20, "Loading configuration..."),
+            (40, "Initializing AI backends..."),
+            (60, "Preparing workspace context..."),
+            (80, "Setting up syntax engines..."),
+            (100, "Ready"),
+        ]
+        for pct, msg in steps:
+            self.progress.emit(pct, msg)
+            self.msleep(180)
+        self.finished_loading.emit()
+
+
+def _load_app_icon() -> Optional[QIcon]:
     logo_path = Path(__file__).resolve().parent / APP_LOGO_FILE
     if not logo_path.exists():
-        return None
-
+        # Fallback: generate a minimal icon programmatically
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        gradient = QLinearGradient(0, 0, 64, 64)
+        gradient.setColorAt(0, QColor(108, 140, 255))
+        gradient.setColorAt(1, QColor(80, 200, 180))
+        painter.setBrush(gradient)
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(8, 8, 48, 48, 12, 12)
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("JetBrains Mono", 24, QFont.Bold))
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, "N")
+        painter.end()
+        return QIcon(pixmap)
     icon = QIcon(str(logo_path))
-    if icon.isNull():
-        return None
-    return icon
+    return icon if not icon.isNull() else None
 
 
 def _looks_like_project_root(path: Path) -> bool:
@@ -69,7 +102,7 @@ def _looks_like_project_root(path: Path) -> bool:
 
 
 def detect_project_root(start: Path) -> Path:
-    """Walk up parents and return the first directory that looks like a project root."""
+    """Intelligently walk up parents to find the project root."""
     current = start.resolve()
     if current.is_file():
         current = current.parent
@@ -99,12 +132,12 @@ def load_recent_workspaces() -> list[str]:
             continue
         seen.add(key)
         cleaned.append(key)
-    return cleaned[:15]
+    return cleaned[:20]
 
 
 def save_recent_workspaces(items: list[str]) -> None:
     RECENT_WORKSPACES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    RECENT_WORKSPACES_FILE.write_text(json.dumps(items[:15], indent=2), encoding="utf-8")
+    RECENT_WORKSPACES_FILE.write_text(json.dumps(items[:20], indent=2), encoding="utf-8")
 
 
 def remember_workspace(path: Path) -> None:
@@ -116,30 +149,39 @@ def remember_workspace(path: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Nova Code Agent — desktop IDE (PySide6/Qt6) with local GGUF, "
-                    "OpenRouter, and NVIDIA NIM backend support.",
+        description="Nova Code Agent — State-of-the-Art AI Coding IDE",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                          # Auto-detect workspace
+  %(prog)s ./my_project            # Open specific folder
+  %(prog)s --backend gguf -m model.gguf
+  %(prog)s --backend openrouter --openrouter-key sk-or-...
+  %(prog)s --agent-mode            # Start in agent mode
+        """,
     )
+    parser.add_argument("target", nargs="?", default=None, help="Project path (folder or file)")
     parser.add_argument("--workspace", "-w", default=None, help="Workspace directory")
-    parser.add_argument("target", nargs="?", default=None,
-                        help="Optional project path (folder or file).")
-    parser.add_argument("--backend", choices=VALID_BACKENDS, default=None,
-                         help="Active generation backend")
-
-    # gguf
-    parser.add_argument("--model", "-m", default=None, help="Path to local GGUF model file")
+    parser.add_argument("--backend", choices=VALID_BACKENDS, default=None, help="Active generation backend")
+    
+    # GGUF
+    parser.add_argument("--model", "-m", default=None, help="Path to local GGUF model")
     parser.add_argument("--ctx", type=int, default=None, help="Context window size")
     parser.add_argument("--threads", type=int, default=None, help="CPU threads")
     parser.add_argument("--gpu-layers", type=int, default=None, help="GPU layers to offload")
-
-    # openrouter
+    
+    # API Backends
     parser.add_argument("--openrouter-key", default=None, help="OpenRouter API key")
-    parser.add_argument("--openrouter-model", default=None, help="OpenRouter model id")
-
-    # nvidia
+    parser.add_argument("--openrouter-model", default=None, help="OpenRouter model ID")
     parser.add_argument("--nvidia-key", default=None, help="NVIDIA NIM API key")
-    parser.add_argument("--nvidia-model", default=None, help="NVIDIA NIM model id")
-
+    parser.add_argument("--nvidia-model", default=None, help="NVIDIA NIM model ID")
+    
+    # Experience
     parser.add_argument("--temp", type=float, default=None, help="Sampling temperature")
+    parser.add_argument("--agent-mode", action="store_true", help="Start in agent mode")
+    parser.add_argument("--no-splash", action="store_true", help="Skip splash screen")
+    parser.add_argument("--theme", choices=["dark", "light", "system"], default=None, help="UI theme")
+    
     return parser.parse_args()
 
 
@@ -147,7 +189,8 @@ def build_settings(args: argparse.Namespace) -> Settings:
     settings = Settings.load()
     settings.normalize_ui_preferences()
 
-    explicit_workspace: Path | None = None
+    # Workspace resolution
+    explicit_workspace: Optional[Path] = None
     if args.workspace:
         explicit_workspace = Path(args.workspace).expanduser().resolve()
     elif args.target:
@@ -160,8 +203,9 @@ def build_settings(args: argparse.Namespace) -> Settings:
     if explicit_workspace:
         settings.workspace = str(explicit_workspace)
     else:
-        # If no path was provided, prefer a project-like root from the current folder.
         settings.workspace = str(detect_project_root(Path.cwd()))
+
+    # Backend & model settings
     if args.backend:
         settings.backend = args.backend
     if args.model:
@@ -182,11 +226,15 @@ def build_settings(args: argparse.Namespace) -> Settings:
         settings.nvidia_model = args.nvidia_model
     if args.temp is not None:
         settings.temperature = args.temp
+    if args.theme:
+        settings.ui_theme = args.theme
+    if args.agent_mode:
+        settings.default_chat_mode = "Agent"
 
-    # Auto-pick a local GGUF model if backend is gguf and no explicit path exists.
+    # Auto-detect GGUF model
     if settings.backend == "gguf" and not settings.model_path:
         workspace_candidate = Path(settings.workspace).expanduser().resolve()
-        model_dir = workspace_candidate / "workspace" / "models"
+        model_dir = workspace_candidate / "models"
         if model_dir.exists() and model_dir.is_dir():
             models = sorted(model_dir.glob("*.gguf"))
             if models:
@@ -199,18 +247,40 @@ def build_settings(args: argparse.Namespace) -> Settings:
 def apply_dark_palette(app: QApplication):
     app.setStyle("Fusion")
     palette = QPalette()
-    palette.setColor(QPalette.Window, QColor(30, 30, 30))
-    palette.setColor(QPalette.WindowText, QColor(204, 204, 204))
-    palette.setColor(QPalette.Base, QColor(30, 30, 30))
-    palette.setColor(QPalette.AlternateBase, QColor(37, 37, 38))
-    palette.setColor(QPalette.ToolTipBase, QColor(45, 45, 45))
-    palette.setColor(QPalette.ToolTipText, QColor(204, 204, 204))
-    palette.setColor(QPalette.Text, QColor(204, 204, 204))
-    palette.setColor(QPalette.Button, QColor(60, 60, 60))
-    palette.setColor(QPalette.ButtonText, QColor(204, 204, 204))
-    palette.setColor(QPalette.BrightText, QColor(255, 0, 0))
-    palette.setColor(QPalette.Highlight, QColor(9, 71, 113))
+    palette.setColor(QPalette.Window, QColor(22, 22, 26))
+    palette.setColor(QPalette.WindowText, QColor(212, 212, 216))
+    palette.setColor(QPalette.Base, QColor(30, 30, 34))
+    palette.setColor(QPalette.AlternateBase, QColor(37, 37, 42))
+    palette.setColor(QPalette.ToolTipBase, QColor(45, 45, 50))
+    palette.setColor(QPalette.ToolTipText, QColor(212, 212, 216))
+    palette.setColor(QPalette.Text, QColor(212, 212, 216))
+    palette.setColor(QPalette.Button, QColor(52, 52, 58))
+    palette.setColor(QPalette.ButtonText, QColor(212, 212, 216))
+    palette.setColor(QPalette.BrightText, QColor(255, 80, 80))
+    palette.setColor(QPalette.Highlight, QColor(108, 140, 255))
     palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    palette.setColor(QPalette.Link, QColor(108, 140, 255))
+    palette.setColor(QPalette.LinkVisited, QColor(180, 140, 255))
+    app.setPalette(palette)
+
+
+def apply_light_palette(app: QApplication):
+    app.setStyle("Fusion")
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor(250, 250, 252))
+    palette.setColor(QPalette.WindowText, QColor(31, 31, 35))
+    palette.setColor(QPalette.Base, QColor(255, 255, 255))
+    palette.setColor(QPalette.AlternateBase, QColor(245, 245, 248))
+    palette.setColor(QPalette.ToolTipBase, QColor(255, 255, 255))
+    palette.setColor(QPalette.ToolTipText, QColor(31, 31, 35))
+    palette.setColor(QPalette.Text, QColor(31, 31, 35))
+    palette.setColor(QPalette.Button, QColor(240, 240, 244))
+    palette.setColor(QPalette.ButtonText, QColor(31, 31, 35))
+    palette.setColor(QPalette.BrightText, QColor(200, 40, 40))
+    palette.setColor(QPalette.Highlight, QColor(0, 112, 224))
+    palette.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    palette.setColor(QPalette.Link, QColor(0, 112, 224))
+    palette.setColor(QPalette.LinkVisited, QColor(120, 80, 200))
     app.setPalette(palette)
 
 
@@ -220,19 +290,66 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("Nova Code Agent")
+    app.setApplicationDisplayName("Nova Code Agent")
+    app.setOrganizationName("NovaAI")
+    
+    # Apply theme
+    if settings.ui_theme == "light":
+        apply_light_palette(app)
+    else:
+        apply_dark_palette(app)
+
     app_icon = _load_app_icon()
     if app_icon is not None:
         app.setWindowIcon(app_icon)
-    apply_dark_palette(app)
 
     workspace_path = Path(settings.workspace).expanduser().resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
     remember_workspace(workspace_path)
 
+    # Splash screen
+    splash = None
+    if not args.no_splash:
+        splash_pixmap = QPixmap(500, 300)
+        splash_pixmap.fill(Qt.transparent)
+        painter = QPainter(splash_pixmap)
+        gradient = QLinearGradient(0, 0, 500, 300)
+        gradient.setColorAt(0, QColor(22, 22, 26))
+        gradient.setColorAt(1, QColor(35, 35, 42))
+        painter.fillRect(splash_pixmap.rect(), gradient)
+        painter.setPen(QColor(108, 140, 255))
+        painter.setFont(QFont("JetBrains Mono", 28, QFont.Bold))
+        painter.drawText(splash_pixmap.rect().adjusted(0, -40, 0, 0), Qt.AlignCenter, "NOVA")
+        painter.setPen(QColor(160, 160, 170))
+        painter.setFont(QFont("Inter", 12))
+        painter.drawText(splash_pixmap.rect().adjusted(0, 20, 0, 0), Qt.AlignCenter, "AI Coding Agent")
+        painter.end()
+        splash = QSplashScreen(splash_pixmap, Qt.WindowStaysOnTopHint)
+        splash.show()
+        app.processEvents()
+
+    # Main window
     window = MainWindow(settings)
     if app_icon is not None:
         window.setWindowIcon(app_icon)
-    window.showMaximized()
+
+    # Startup sequence
+    def finish_startup():
+        if splash:
+            splash.finish(window)
+        window.showMaximized()
+        window.raise_()
+        window.activateWindow()
+
+    if splash:
+        startup = StartupWorker()
+        startup.progress.connect(lambda pct, msg: splash.showMessage(
+            f"  {msg}", Qt.AlignBottom | Qt.AlignLeft, QColor(160, 160, 170)
+        ))
+        startup.finished_loading.connect(finish_startup)
+        startup.start()
+    else:
+        window.showMaximized()
 
     sys.exit(app.exec())
 

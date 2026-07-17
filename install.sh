@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────
-# GGUF Code Agent — installer
+# Nova Code Agent — installer
 # ─────────────────────────────────────────────────────────────────────
 set -e
 
-echo "🔧 Installing GGUF Code Agent dependencies…"
+echo "🔧 Installing Nova Code Agent dependencies…"
 
 # ── 1. plain CPU build (default) ────────────────────────────────────
 pip install -r requirements.txt -i https://mirror-pypi.runflare.com/simple

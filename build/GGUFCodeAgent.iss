@@ -1,6 +1,6 @@
-#define MyAppName "GGUF Code Agent"
+#define MyAppName "Nova Code Agent"
 #define MyAppVersion "0.1.0"
-#define MyAppPublisher "GGUF Code Agent"
+#define MyAppPublisher "Nova Code Agent"
 #define MyAppExeName "GGUF-Code-Agent.exe"
 
 [Setup]

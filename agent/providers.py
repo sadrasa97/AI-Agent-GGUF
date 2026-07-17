@@ -202,7 +202,7 @@ class OpenRouterProvider(_OpenAICompatibleProvider):
         # OpenRouter wants these for attribution / rate-limit tiers (optional but recommended)
         self.extra_headers = {
             "HTTP-Referer": "https://github.com/local/gguf-code-agent",
-            "X-Title": "GGUF Code Agent",
+            "X-Title": "Nova Code Agent",
         }
 
 

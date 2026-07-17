@@ -1,5 +1,5 @@
 """
-GGUF Code Agent — VS Code-style desktop IDE (PySide6 / Qt6)
+Nova Code Agent — VS Code-style desktop IDE (PySide6 / Qt6)
 
 Run:
     python app.py
@@ -18,6 +18,19 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+# --- Pre-import modules that conflict with PySide6's shiboken import hook ---
+# PySide6 registers a "feature_imported" hook (shibokensupport) that intercepts
+# `six.moves` imports.  When dateutil (via pandas → sklearn → transformers) later
+# does `from six.moves import _thread`, the hook crashes because six's
+# _SixMetaPathImporter has no `_path` attribute.  This corrupts Python's import
+# state and causes subsequent `from transformers.generation import GenerationMixin`
+# to fail.  Pre-loading these modules before PySide6 avoids the conflict entirely.
+try:
+    from six.moves import _thread  # noqa: F401
+    import dateutil.tz  # noqa: F401
+except Exception:
+    pass
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPalette, QColor, QIcon
@@ -103,7 +116,7 @@ def remember_workspace(path: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="GGUF Code Agent — desktop IDE (PySide6/Qt6) with local GGUF, "
+        description="Nova Code Agent — desktop IDE (PySide6/Qt6) with local GGUF, "
                     "OpenRouter, and NVIDIA NIM backend support.",
     )
     parser.add_argument("--workspace", "-w", default=None, help="Workspace directory")
@@ -206,7 +219,7 @@ def main():
     settings = build_settings(args)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("GGUF Code Agent")
+    app.setApplicationName("Nova Code Agent")
     app_icon = _load_app_icon()
     if app_icon is not None:
         app.setWindowIcon(app_icon)

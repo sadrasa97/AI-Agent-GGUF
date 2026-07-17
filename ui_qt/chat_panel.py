@@ -21,7 +21,8 @@ from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QComboBox, QFileDialog, QFrame, QScrollArea,
-    QSizePolicy, QApplication,
+    QSizePolicy, QApplication, QTabWidget, QToolButton, QInputDialog,
+    QLineEdit,
 )
 
 from config.settings import Settings
@@ -421,11 +422,6 @@ class ChatPanel(QWidget):
         self.voice_btn.clicked.connect(self._toggle_voice_recording)
         composer_btn_row.addWidget(self.voice_btn)
 
-        self.clear_btn = QPushButton("🗑")
-        self.clear_btn.setToolTip("Clear conversation")
-        self.clear_btn.clicked.connect(self.clear_history)
-        composer_btn_row.addWidget(self.clear_btn)
-
         composer_btn_row.addStretch()
 
         self.send_btn = QPushButton("➤")
@@ -454,11 +450,6 @@ class ChatPanel(QWidget):
         )
         self.attach_btn.setStyleSheet(icon_btn_style)
         self.voice_btn.setStyleSheet(icon_btn_style)
-        self.clear_btn.setStyleSheet(
-            icon_btn_style.replace("color:#c9c9cc", "color:#8a8b90").replace(
-                "QPushButton:hover { background:#2f3034;", "QPushButton:hover { background:#3a2c2c; color:#f48771;"
-            )
-        )
         self.send_btn.setStyleSheet(
             "QPushButton { background:#6c8cff; color:white; padding:4px 12px; border:none; "
             "border-radius:9px; font-weight:700; font-size:12px; min-width:22px; }"
@@ -934,3 +925,115 @@ class ChatPanel(QWidget):
         return (
             text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
         )
+
+
+class ChatTabsPanel(QWidget):
+    """Hosts multiple independent ChatPanel sessions in a tabbed strip
+    above the chat area (VS-Code-Copilot-Chat style 'new session' tabs).
+
+    Each tab owns its own ChatPanel instance, which means its own
+    `history` list, its own GenerationWorker/QThread, its own attachments,
+    mode, and backend selector — sessions never share state. Closing a
+    tab tears down that ChatPanel's in-flight generation (if any) and
+    discards its history.
+    """
+
+    codeBlockReady = Signal(str, str)              # (language, code) — from active session
+    agentFileEdit = Signal(str, str, str)           # (relative_path, language, code) — from any session
+
+    def __init__(self, settings: Settings, get_workspace_context, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.get_workspace_context = get_workspace_context
+        self._session_counter = 0
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabCloseRequested.connect(self._close_tab)
+        self.tabs.tabBarDoubleClicked.connect(self._rename_tab)
+        self.tabs.setStyleSheet(
+            "QTabWidget::pane { border:none; top:0px; }"
+            "QTabBar { background:#1a1b1e; }"
+            "QTabBar::tab { background:#232427; color:#9a9ba1; padding:6px 14px; "
+            "margin-right:2px; border-top-left-radius:8px; border-top-right-radius:8px; "
+            "font-size:11px; font-weight:600; }"
+            "QTabBar::tab:selected { background:#2b2d31; color:#eaeaea; }"
+            "QTabBar::tab:hover { background:#2a2b30; }"
+            "QTabBar::close-button { subcontrol-position: right; }"
+        )
+        layout.addWidget(self.tabs, stretch=1)
+
+        # "+ New chat" button pinned to the tab bar's corner.
+        new_tab_btn = QToolButton()
+        new_tab_btn.setText("+")
+        new_tab_btn.setToolTip("New chat session (Ctrl+T)")
+        new_tab_btn.setStyleSheet(
+            "QToolButton { background:#232427; color:#c9c9cc; border:none; "
+            "border-radius:6px; padding:2px 10px; font-weight:700; font-size:13px; margin:3px; }"
+            "QToolButton:hover { background:#2f3034; }"
+        )
+        new_tab_btn.clicked.connect(lambda: self.add_new_tab())
+        self.tabs.setCornerWidget(new_tab_btn, Qt.TopRightCorner)
+
+        self.add_new_tab()
+
+    # ------------------------------------------------------------------
+    def add_new_tab(self, title: Optional[str] = None) -> ChatPanel:
+        self._session_counter += 1
+        panel = ChatPanel(self.settings, self.get_workspace_context)
+        panel.codeBlockReady.connect(self.codeBlockReady.emit)
+        panel.agentFileEdit.connect(self.agentFileEdit.emit)
+
+        label = title or f"Chat {self._session_counter}"
+        index = self.tabs.addTab(panel, label)
+        self.tabs.setCurrentIndex(index)
+        panel.input_box.setFocus()
+        return panel
+
+    def _close_tab(self, index: int):
+        panel = self.tabs.widget(index)
+        if panel is None:
+            return
+        if self.tabs.count() <= 1:
+            # Keep at least one session alive — reset it instead of removing.
+            panel.stop_generation()
+            panel.clear_history()
+            return
+        panel.stop_generation()
+        self.tabs.removeTab(index)
+        panel.deleteLater()
+
+    def _rename_tab(self, index: int):
+        if index < 0:
+            return
+        current = self.tabs.tabText(index)
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Chat Session", "Session name:", QLineEdit.Normal, current
+        )
+        if ok and new_name.strip():
+            self.tabs.setTabText(index, new_name.strip())
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers used by MainWindow
+    # ------------------------------------------------------------------
+    @property
+    def current_panel(self) -> Optional[ChatPanel]:
+        return self.tabs.currentWidget()
+
+    def all_panels(self) -> list[ChatPanel]:
+        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+
+    def sync_backend_combo(self, backend: str):
+        """Reflect a backend change (made elsewhere, e.g. Model Settings dialog)
+        across every open chat session."""
+        for panel in self.all_panels():
+            if panel is not None:
+                panel.backend_combo.blockSignals(True)
+                panel.backend_combo.setCurrentText(backend)
+                panel.backend_combo.blockSignals(False)

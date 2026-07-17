@@ -42,7 +42,7 @@ from tools.code_tools import (
 )
 from ui_qt.editor import EditorTabs
 from ui_qt.file_explorer import FileExplorer
-from ui_qt.chat_panel import ChatPanel
+from ui_qt.chat_panel import ChatTabsPanel
 from ui_qt.model_settings_dialog import ModelSettingsDialog
 from ui_qt.output_panel import OutputPanel
 
@@ -179,7 +179,7 @@ class MainWindow(QMainWindow):
         self._last_generated_block: CodeBlock | None = None
         if self.settings.ui_theme not in VALID_UI_THEMES:
             self.settings.ui_theme = "dark"
-        self.setWindowTitle("GGUF Code Agent — IDE")
+        self.setWindowTitle("Nova Code Agent — IDE")
         self.resize(1440, 900)
         self.setStyleSheet(DARK_STYLESHEET)
 
@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
         self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
 
         # ---- chat dock (right) ----
-        self.chat_panel = ChatPanel(self.settings, self._workspace_context_for_chat)
+        self.chat_panel = ChatTabsPanel(self.settings, self._workspace_context_for_chat)
         self.chat_panel.codeBlockReady.connect(self._on_code_block_from_chat)
         self.chat_panel.agentFileEdit.connect(self._on_agent_file_edit)
         chat_dock = QDockWidget("CHAT", self)
@@ -307,6 +307,11 @@ class MainWindow(QMainWindow):
         self.chat_dock.visibilityChanged.connect(toggle_chat_action.setChecked)
         view_menu.addAction(toggle_chat_action)
 
+        new_chat_tab_action = QAction("New Chat Session", self)
+        new_chat_tab_action.setShortcut(QKeySequence("Ctrl+T"))
+        new_chat_tab_action.triggered.connect(lambda: self.chat_panel.add_new_tab())
+        view_menu.addAction(new_chat_tab_action)
+
         toggle_output_action = QAction("Toggle Output", self)
         toggle_output_action.setCheckable(True)
         toggle_output_action.setChecked(True)
@@ -355,7 +360,7 @@ class MainWindow(QMainWindow):
         help_menu = menubar.addMenu("&Help")
         about_action = QAction("About", self)
         about_action.triggered.connect(
-            lambda: QMessageBox.information(self, "About", "GGUF Code Agent")
+            lambda: QMessageBox.information(self, "About", "Nova Code Agent")
         )
         help_menu.addAction(about_action)
 
@@ -609,9 +614,9 @@ class MainWindow(QMainWindow):
 
     def _on_active_file_changed(self, path):
         if path:
-            self.setWindowTitle(f"{Path(path).name} — GGUF Code Agent")
+            self.setWindowTitle(f"{Path(path).name} — Nova Code Agent")
         else:
-            self.setWindowTitle("GGUF Code Agent — IDE")
+            self.setWindowTitle("Nova Code Agent — IDE")
 
     # ──────────────────────────────────────────────────────────────
     # Run
@@ -805,7 +810,7 @@ class MainWindow(QMainWindow):
     def _open_model_settings_dialog(self):
         dialog = ModelSettingsDialog(self.settings, self)
         if dialog.exec():
-            self.chat_panel.backend_combo.setCurrentText(self.settings.backend)
+            self.chat_panel.sync_backend_combo(self.settings.backend)
 
     def _apply_last_generated_code(self):
         if self._last_generated_block is None:

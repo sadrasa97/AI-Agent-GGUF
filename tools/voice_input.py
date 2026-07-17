@@ -186,6 +186,19 @@ def _ensure_qwen_factor_config(model_path: str) -> None:
 def _patch_check_model_inputs():
     """Patch transformers check_model_inputs to work as both @decorator and @decorator().
     Also patch AutoConfig.register to allow re-registration of existing model types."""
+    # IMPORTANT: fully initialize the top-level `transformers` package before touching
+    # any of its submodules directly. transformers uses a lazy-module system in its
+    # __init__.py; importing e.g. `transformers.utils.generic` first (without triggering
+    # the full top-level init) can leave the package half-initialized, which later
+    # surfaces as `cannot import name 'GenerationMixin' from 'transformers.generation'`
+    # deep inside qwen_asr. This only happens depending on *what already ran earlier in
+    # the same process* — it's why a standalone `python -c "from qwen_asr import ..."`
+    # works fine but fails here.
+    try:
+        import transformers  # noqa: F401
+    except Exception:
+        pass
+
     try:
         import transformers.utils.generic as _generic
         _orig = getattr(_generic, "check_model_inputs", None)
@@ -266,6 +279,26 @@ def _patch_check_model_inputs():
         pass
 
 
+def _prime_transformers_for_qwen_import() -> None:
+    """Pre-load transformers modules that qwen_asr expects during import.
+
+    In some mixed-import processes, transformers' lazy module state can become
+    partially initialized, and qwen_asr then fails while importing
+    `GenerationMixin` from `transformers.generation`.
+    """
+    try:
+        import transformers  # noqa: F401
+        import transformers.generation as _generation
+        import transformers.generation.utils as _generation_utils
+
+        # Be defensive: if lazy exports are incomplete, backfill from utils.
+        if not hasattr(_generation, "GenerationMixin") and hasattr(_generation_utils, "GenerationMixin"):
+            _generation.GenerationMixin = _generation_utils.GenerationMixin
+    except Exception:
+        # qwen_asr import below will surface the real error with context.
+        pass
+
+
 def _load_qwen3_asr(model_path: str):
     """Load Qwen3ASRModel using the qwen_asr package."""
     global _cached_qwen3_asr_model, _cached_qwen3_asr_path
@@ -274,6 +307,31 @@ def _load_qwen3_asr(model_path: str):
         return _cached_qwen3_asr_model
 
     _ensure_qwen_factor_config(model_path)
+
+    # Import torch + qwen_asr FIRST, completely unpatched, exactly like the standalone
+    # `python -c "from qwen_asr import Qwen3ASRModel"` that is known to work. Patching
+    # transformers/qwen_asr submodules *before* this import forces Python to load those
+    # submodules out of the order qwen_asr's own __init__ expects, which is what was
+    # producing "cannot import name 'GenerationMixin' from transformers.generation".
+    # All monkeypatches below are applied AFTER this import succeeds, directly on the
+    # already-loaded module/class objects — patching after import is safe and avoids
+    # disturbing transformers' internal lazy-loading order.
+    _prime_transformers_for_qwen_import()
+
+    try:
+        import torch
+        from qwen_asr import Qwen3ASRModel
+    except ImportError as exc:
+        raise VoiceError(
+            "Failed to import torch/qwen_asr inside the app process.\n"
+            f"Underlying error: {type(exc).__name__}: {exc}\n"
+            "If 'pip install qwen-asr' and a standalone "
+            "'python -c \"from qwen_asr import Qwen3ASRModel\"' both already work, "
+            "this is NOT a missing-package issue — it's almost always a DLL/version "
+            "conflict that only shows up once other heavy libraries (llama-cpp-python, "
+            "sklearn, transformers) are already loaded in the same process."
+        ) from exc
+
     _patch_check_model_inputs()
 
     # Patch Qwen3ASRConfig.get_text_config to handle uninitialized state
@@ -319,15 +377,6 @@ def _load_qwen3_asr(model_path: str):
         Qwen3ASRThinkerConfig.__init__ = _patched_thinker_init
     except Exception:
         pass
-
-    try:
-        import torch
-        from qwen_asr import Qwen3ASRModel
-    except ImportError as exc:
-        raise VoiceError(
-            "qwen_asr package is required for Qwen3-ASR. "
-            "Install with: pip install qwen-asr"
-        ) from exc
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32

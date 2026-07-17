@@ -1,5 +1,5 @@
 """
-Configuration settings for GGUF Code Agent.
+Configuration settings for Nova Code Agent.
 """
 import json
 import sys

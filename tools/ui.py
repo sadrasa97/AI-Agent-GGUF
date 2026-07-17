@@ -47,7 +47,7 @@ def banner(model_name: str, workspace: str):
      ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝         ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝
     
     ┌─────────────────────────────────────────────────────────────────────────────────┐
-    │                           GGUF CODE AGENT                                       │
+    │                           Nova Code Agent                                       │
     │                 Local AI Coding Assistant powered by GGUF                       │
     ├─────────────────────────────────────────────────────────────────────────────────┤
     │ Backend      : llama.cpp / llama-cpp-python                                     │
@@ -65,7 +65,7 @@ def banner(model_name: str, workspace: str):
             Panel.fit(
                 f"[bold green]Model:[/bold green] {model_name}\n"
                 f"[bold blue]Workspace:[/bold blue] {workspace}",
-                title="[bold]GGUF Code Agent[/bold]",
+                title="[bold]Nova Code Agent[/bold]",
                 border_style="cyan",
             )
         )

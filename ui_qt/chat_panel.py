@@ -30,7 +30,7 @@ from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPlainTextEdit,
     QPushButton, QComboBox, QFileDialog, QFrame, QScrollArea,
-    QSizePolicy, QApplication, QTabWidget, QToolButton, QInputDialog,
+    QSizePolicy, QApplication, QTabWidget, QTabBar, QToolButton, QInputDialog,
     QLineEdit, QGraphicsDropShadowEffect,
 )
 from PySide6.QtGui import QColor
@@ -1356,21 +1356,25 @@ class ChatTabsPanel(QWidget):
         self.setStyleSheet(f"background:{Theme.app_bg};")
 
         self.tabs = QTabWidget()
-        self.tabs.setTabsClosable(True)
+        # Native close buttons are replaced below with the same custom
+        # QToolButton close affordance used by the editor tabs, so both
+        # tab strips in the app look and behave identically.
+        self.tabs.setTabsClosable(False)
         self.tabs.setMovable(True)
         self.tabs.setDocumentMode(True)
-        self.tabs.tabCloseRequested.connect(self._close_tab)
         self.tabs.tabBarDoubleClicked.connect(self._rename_tab)
+        # Same flat tab shape + bottom accent underline as EditorTabs
+        # (see ui_qt/editor.py THEMES[...]["tabs_style"]) so the chat tab
+        # bar is visually identical to the editor tab bar.
         self.tabs.setStyleSheet(
-            f"QTabWidget::pane {{ border:none; top:0px; }}"
-            f"QTabBar {{ background:{Theme.app_bg}; }}"
-            f"QTabBar::tab {{ background:{Theme.surface}; color:{Theme.text_dim}; padding:7px 16px; "
-            f"margin:4px 3px 0px 3px; border-top-left-radius:9px; border-top-right-radius:9px; "
-            f"font-size:11px; font-weight:600; border:1px solid transparent; }}"
+            f"QTabWidget::pane {{ border:none; background:{Theme.panel_bg}; top:-1px; }}"
+            f"QTabBar {{ qproperty-drawBase: 0; background:{Theme.app_bg}; }}"
+            f"QTabBar::tab {{ background:{Theme.surface}; color:{Theme.text_dim}; "
+            f"padding:10px 24px 10px 16px; margin-right:2px; border:none; "
+            f"border-bottom:2px solid transparent; font-size:12px; font-weight:600; }}"
             f"QTabBar::tab:selected {{ background:{Theme.panel_bg}; color:{Theme.text}; "
-            f"border:1px solid {Theme.panel_border}; border-bottom:2px solid {Theme.accent_a}; }}"
-            f"QTabBar::tab:hover {{ background:{Theme.surface_hover}; color:{Theme.text}; }}"
-            f"QTabBar::close-button {{ subcontrol-position: right; }}"
+            f"border-bottom:2px solid {Theme.accent_a}; }}"
+            f"QTabBar::tab:hover:!selected {{ background:{Theme.surface_hover}; color:{Theme.text}; }}"
         )
         layout.addWidget(self.tabs, stretch=1)
 
@@ -1399,9 +1403,34 @@ class ChatTabsPanel(QWidget):
 
         label = title or f"Chat {self._session_counter}"
         index = self.tabs.addTab(panel, label)
+        self._install_close_button(index)
         self.tabs.setCurrentIndex(index)
         panel.input_box.setFocus()
         return panel
+
+    def _install_close_button(self, index: int):
+        """Attach a close button styled exactly like EditorTabs' close
+        button (ui_qt/editor.py THEMES[...]["tab_close_btn"]), instead of
+        Qt's native (differently shaped) close indicator."""
+        btn = QToolButton()
+        btn.setText("✕")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedSize(18, 18)
+        btn.setToolTip("Close chat session")
+        btn.setStyleSheet(
+            "QToolButton { color:#5A647D; background: transparent; border: none; "
+            "padding: 0px; border-radius: 4px; font-size: 11px; }"
+            "QToolButton:hover { color:#E2E8F0; background:#252B3D; }"
+        )
+        btn.clicked.connect(lambda: self._close_tab(self._index_of_button(btn)))
+        self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, btn)
+
+    def _index_of_button(self, button) -> int:
+        bar = self.tabs.tabBar()
+        for i in range(bar.count()):
+            if bar.tabButton(i, QTabBar.ButtonPosition.RightSide) is button:
+                return i
+        return -1
 
     def _close_tab(self, index: int):
         panel = self.tabs.widget(index)

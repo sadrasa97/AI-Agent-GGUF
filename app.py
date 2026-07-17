@@ -49,6 +49,7 @@ PROJECT_MARKERS = (
 )
 APP_LOGO_FILE = "nova_logo.png"
 SPLASH_FILE = "nova_splash.png"
+EMPTY_WORKSPACE_DIR = CONFIG_DIR / "__no_project__"
 
 
 class StartupWorker(QThread):
@@ -153,7 +154,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                          # Auto-detect workspace
+    %(prog)s                          # Start with no folder opened
   %(prog)s ./my_project            # Open specific folder
   %(prog)s --backend gguf -m model.gguf
   %(prog)s --backend openrouter --openrouter-key sk-or-...
@@ -203,7 +204,7 @@ def build_settings(args: argparse.Namespace) -> Settings:
     if explicit_workspace:
         settings.workspace = str(explicit_workspace)
     else:
-        settings.workspace = str(detect_project_root(Path.cwd()))
+        settings.workspace = str(EMPTY_WORKSPACE_DIR.resolve())
 
     # Backend & model settings
     if args.backend:
@@ -286,12 +287,13 @@ def apply_light_palette(app: QApplication):
 
 def main():
     args = parse_args()
-    settings = build_settings(args)
 
     app = QApplication(sys.argv)
     app.setApplicationName("Nova Code Agent")
     app.setApplicationDisplayName("Nova Code Agent")
     app.setOrganizationName("NovaAI")
+
+    settings = build_settings(args)
     
     # Apply theme
     if settings.ui_theme == "light":
@@ -305,7 +307,8 @@ def main():
 
     workspace_path = Path(settings.workspace).expanduser().resolve()
     workspace_path.mkdir(parents=True, exist_ok=True)
-    remember_workspace(workspace_path)
+    if workspace_path != EMPTY_WORKSPACE_DIR.resolve():
+        remember_workspace(workspace_path)
 
     # Splash screen
     splash = None

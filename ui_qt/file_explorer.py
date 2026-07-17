@@ -7,6 +7,12 @@ from PySide6.QtGui import QAction
 
 IGNORED_DIRS = {"__pycache__", ".git", "node_modules", ".venv", "venv", "dist", "build"}
 
+
+def _workspace_header_text(workspace: Path) -> str:
+    if workspace.name == "__no_project__":
+        return "NO FOLDER OPENED"
+    return workspace.name.upper() or "WORKSPACE"
+
 class FileExplorer(QWidget):
     fileActivated = Signal(Path)
     runRequested = Signal(Path)
@@ -20,7 +26,7 @@ class FileExplorer(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.header = QLabel(self.workspace.name.upper() or "WORKSPACE")
+        self.header = QLabel(_workspace_header_text(self.workspace))
         layout.addWidget(self.header)
         self.model = QFileSystemModel()
         self.model.setRootPath(str(self.workspace))
@@ -39,7 +45,7 @@ class FileExplorer(QWidget):
         self.workspace = Path(workspace)
         self.model.setRootPath(str(self.workspace))
         self.tree.setRootIndex(self.model.index(str(self.workspace)))
-        self.header.setText(self.workspace.name.upper() or "WORKSPACE")
+        self.header.setText(_workspace_header_text(self.workspace))
 
     def refresh(self):
         self.model.setRootPath(str(self.workspace))

@@ -9,8 +9,10 @@ from PySide6.QtGui import QColor, QFont, QPainter, QTextFormat, QTextCursor, QTe
 from PySide6.QtWidgets import (
     QPlainTextEdit, QTabWidget, QTabBar, QTextEdit, QWidget, QMessageBox, QFileDialog,
     QHBoxLayout, QVBoxLayout, QLineEdit, QPushButton, QLabel, QFrame, QSizePolicy, QToolButton,
+    QToolTip,
 )
 from ui_qt.syntax import CodeHighlighter
+from ui_qt.hover_docs import lookup_hover_doc
 
 THEMES = {
     "dark": {
@@ -98,6 +100,12 @@ class CodeEditor(QPlainTextEdit):
         self.apply_theme("dark")
         self.textChanged.connect(self._mark_dirty)
         self.textChanged.connect(self._queue_diagnostics)
+        # VS-Code-style hover: mouse tracking lets us receive
+        # mouseMoveEvent without a button held down, so we can show a
+        # tooltip for the diagnostic/error under the cursor, or a short
+        # doc blurb for a recognized builtin/keyword/library name.
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
 
     def _mark_dirty(self): self.is_dirty = True
     def mark_clean(self): self.is_dirty = False
@@ -174,6 +182,38 @@ class CodeEditor(QPlainTextEdit):
         if event.matches(QKeySequence.Find): self.findRequested.emit(); event.accept(); return
         if event.matches(QKeySequence.Replace): self.replaceRequested.emit(); event.accept(); return
         super().keyPressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        cursor = self.cursorForPosition(event.pos())
+        global_pos = self.viewport().mapToGlobal(event.pos())
+
+        # 1) Diagnostics take priority — if the mouse is over a squiggly
+        #    error line, show the exact parser/JSON error message, VS
+        #    Code-style.
+        for sel in self._error_selections:
+            if sel.cursor.blockNumber() == cursor.blockNumber():
+                message = sel.format.toolTip()
+                if message:
+                    QToolTip.showText(global_pos, f"⚠ {message}", self)
+                    return
+
+        # 2) Otherwise, look up the word under the cursor against the
+        #    small offline hover-doc dictionary (builtins/keywords/known
+        #    libraries), same idea as VS Code's IntelliSense hover.
+        word_cursor = QTextCursor(cursor)
+        word_cursor.select(QTextCursor.WordUnderCursor)
+        word = word_cursor.selectedText()
+        ext = self.file_path.suffix.lstrip(".") if self.file_path else self.highlighter.extension
+        doc = lookup_hover_doc(word, ext)
+        if doc:
+            QToolTip.showText(global_pos, doc, self)
+        else:
+            QToolTip.hideText()
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 class FindReplaceBar(QFrame):
     def __init__(self, editor: "CodeEditor", parent=None):

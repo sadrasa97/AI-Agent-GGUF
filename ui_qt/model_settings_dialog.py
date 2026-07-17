@@ -87,7 +87,15 @@ class ModelSettingsDialog(QDialog):
         qwen_voice_browse_btn.clicked.connect(self._browse_qwen_voice_model)
         qwen_voice_row.addWidget(self.qwen_voice_model_edit, 1)
         qwen_voice_row.addWidget(qwen_voice_browse_btn)
-        voice_form.addRow("Qwen Voice model path", qwen_voice_row)
+        voice_form.addRow("Qwen Voice GGUF model", qwen_voice_row)
+
+        qwen_mmproj_row = QHBoxLayout()
+        self.qwen_voice_mmproj_edit = QLineEdit(getattr(self.settings, "qwen_voice_mmproj_path", ""))
+        qwen_mmproj_browse_btn = QPushButton("Browse...")
+        qwen_mmproj_browse_btn.clicked.connect(self._browse_qwen_voice_mmproj)
+        qwen_mmproj_row.addWidget(self.qwen_voice_mmproj_edit, 1)
+        qwen_mmproj_row.addWidget(qwen_mmproj_browse_btn)
+        voice_form.addRow("Qwen Voice mmproj", qwen_mmproj_row)
 
         self.asr_model_edit = QLineEdit(self.settings.asr_model_path)
         voice_form.addRow("Fallback ASR model", self.asr_model_edit)
@@ -131,13 +139,28 @@ class ModelSettingsDialog(QDialog):
         current = self.qwen_voice_model_edit.text().strip()
         if current:
             start_dir = str(Path(current).expanduser().parent)
-        folder = QFileDialog.getExistingDirectory(
+        filename, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Qwen Voice Model Directory",
+            "Select Qwen Voice GGUF Model",
             start_dir,
+            "GGUF Models (*.gguf)",
         )
-        if folder:
-            self.qwen_voice_model_edit.setText(folder)
+        if filename:
+            self.qwen_voice_model_edit.setText(filename)
+
+    def _browse_qwen_voice_mmproj(self):
+        start_dir = ""
+        current = self.qwen_voice_mmproj_edit.text().strip()
+        if current:
+            start_dir = str(Path(current).expanduser().parent)
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Qwen Voice mmproj GGUF",
+            start_dir,
+            "GGUF Models (*.gguf)",
+        )
+        if filename:
+            self.qwen_voice_mmproj_edit.setText(filename)
 
     def _save_and_accept(self):
         self.settings.backend = self.backend_combo.currentText().strip() or self.settings.backend
@@ -149,6 +172,7 @@ class ModelSettingsDialog(QDialog):
         self.settings.nvidia_model = self.nvidia_model_edit.text().strip() or self.settings.nvidia_model
         self.settings.asr_backend = self.asr_backend_combo.currentText().strip() or "local"
         self.settings.qwen_voice_model_path = self.qwen_voice_model_edit.text().strip()
+        self.settings.qwen_voice_mmproj_path = self.qwen_voice_mmproj_edit.text().strip()
         self.settings.asr_model_path = self.asr_model_edit.text().strip()
         self.settings.asr_language = self.asr_language_edit.text().strip() or "Auto"
         self.settings.asr_api_url = self.asr_api_url_edit.text().strip()

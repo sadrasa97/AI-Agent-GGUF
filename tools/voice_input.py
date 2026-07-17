@@ -128,7 +128,11 @@ _WHISPER_FALLBACK = "openai/whisper-base"
 
 # Cached Qwen3 ASR model instance
 _cached_qwen3_asr_model: Optional[object] = None
-_cached_qwen3_asr_path: Optional[str] = None
+_cached_qwen3_asr_cache_key: Optional[str] = None
+
+
+def _qwen3_asr_cache_key(model_path: str, mmproj_path: str) -> str:
+    return f"{model_path}::{mmproj_path}"
 
 
 def _ensure_qwen_factor_config(model_path: str) -> None:
@@ -299,11 +303,12 @@ def _prime_transformers_for_qwen_import() -> None:
         pass
 
 
-def _load_qwen3_asr(model_path: str):
+def _load_qwen3_asr(model_path: str, mmproj_path: str = ""):
     """Load Qwen3ASRModel using the qwen_asr package."""
-    global _cached_qwen3_asr_model, _cached_qwen3_asr_path
+    global _cached_qwen3_asr_model, _cached_qwen3_asr_cache_key
 
-    if _cached_qwen3_asr_model is not None and _cached_qwen3_asr_path == model_path:
+    cache_key = _qwen3_asr_cache_key(model_path, mmproj_path)
+    if _cached_qwen3_asr_model is not None and _cached_qwen3_asr_cache_key == cache_key:
         return _cached_qwen3_asr_model
 
     _ensure_qwen_factor_config(model_path)
@@ -422,24 +427,71 @@ def _load_qwen3_asr(model_path: str):
     except Exception:
         pass
 
-    attempts = [
-        {"dtype": dtype, "device_map": device, "max_new_tokens": 256, "trust_remote_code": True},
-        {"dtype": dtype, "device_map": device, "trust_remote_code": True},
-        {"torch_dtype": dtype, "device_map": device, "trust_remote_code": True},
-        {"dtype": dtype, "max_new_tokens": 256, "trust_remote_code": True},
-        {"dtype": dtype, "trust_remote_code": True},
-        {"trust_remote_code": True},
-        {},
-    ]
     errors: list[str] = []
     model = None
+    is_gguf_model = os.path.isfile(model_path) and model_path.lower().endswith(".gguf")
 
-    for kwargs in attempts:
-        try:
-            model = Qwen3ASRModel.from_pretrained(model_path, **kwargs)
-            break
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"kwargs={kwargs}: {exc}")
+    if is_gguf_model:
+        if not mmproj_path:
+            raise VoiceError(
+                "Qwen Voice mmproj path is empty. Set it in Settings when using a GGUF ASR model."
+            )
+        if not os.path.isfile(mmproj_path):
+            raise VoiceError(f"Qwen Voice mmproj file not found: {mmproj_path}")
+
+        attempts = [
+            (
+                "ctor(model_path=..., mmproj_path=...)",
+                lambda: Qwen3ASRModel(model_path=model_path, mmproj_path=mmproj_path),
+            ),
+            (
+                "ctor(model=..., mmproj=...)",
+                lambda: Qwen3ASRModel(model=model_path, mmproj=mmproj_path),
+            ),
+            (
+                "ctor(positional)",
+                lambda: Qwen3ASRModel(model_path, mmproj_path),
+            ),
+            (
+                "from_pretrained(mmproj_path=...)",
+                lambda: Qwen3ASRModel.from_pretrained(
+                    model_path,
+                    mmproj_path=mmproj_path,
+                    trust_remote_code=True,
+                ),
+            ),
+            (
+                "from_pretrained(model=..., mmproj=...)",
+                lambda: Qwen3ASRModel.from_pretrained(
+                    model=model_path,
+                    mmproj=mmproj_path,
+                    trust_remote_code=True,
+                ),
+            ),
+        ]
+        for label, loader in attempts:
+            try:
+                model = loader()
+                break
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{label}: {exc}")
+    else:
+        attempts = [
+            {"dtype": dtype, "device_map": device, "max_new_tokens": 256, "trust_remote_code": True},
+            {"dtype": dtype, "device_map": device, "trust_remote_code": True},
+            {"torch_dtype": dtype, "device_map": device, "trust_remote_code": True},
+            {"dtype": dtype, "max_new_tokens": 256, "trust_remote_code": True},
+            {"dtype": dtype, "trust_remote_code": True},
+            {"trust_remote_code": True},
+            {},
+        ]
+
+        for kwargs in attempts:
+            try:
+                model = Qwen3ASRModel.from_pretrained(model_path, **kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"kwargs={kwargs}: {exc}")
 
     if model is None:
         short_errors = " | ".join(errors[-3:])
@@ -448,12 +500,15 @@ def _load_qwen3_asr(model_path: str):
         )
 
     _cached_qwen3_asr_model = model
-    _cached_qwen3_asr_path = model_path
+    _cached_qwen3_asr_cache_key = cache_key
     return model
 
 
 def _is_qwen3_asr_model(model_id: str) -> bool:
     """Check if model_id points to a Qwen3-ASR checkpoint."""
+    if model_id.lower().endswith(".gguf"):
+        return True
+
     config_path = os.path.join(model_id, "config.json") if os.path.isdir(model_id) else None
     if config_path and os.path.isfile(config_path):
         import json
@@ -468,12 +523,13 @@ def _is_qwen3_asr_model(model_id: str) -> bool:
 
 def _transcribe_local(audio_path: Path, settings: Settings) -> str:
     model_id = (settings.qwen_voice_model_path or settings.asr_model_path or "").strip()
+    mmproj_path = (getattr(settings, "qwen_voice_mmproj_path", "") or "").strip()
     if not model_id:
         raise VoiceError("Local ASR model path/id is empty. Set it in Settings.")
 
     # --- Qwen3-ASR path: use qwen_asr package directly ---
     if _is_qwen3_asr_model(model_id):
-        return _transcribe_qwen3_asr(audio_path, model_id, settings)
+        return _transcribe_qwen3_asr(audio_path, model_id, mmproj_path, settings)
 
     # --- Generic HuggingFace ASR pipeline (whisper, wav2vec, etc.) ---
     return _transcribe_hf_pipeline(audio_path, model_id, settings)
@@ -557,9 +613,9 @@ def _resample_to_16k(audio_np, sr: int):
         ) from exc
 
 
-def _transcribe_qwen3_asr(audio_path: Path, model_path: str, settings: Settings) -> str:
+def _transcribe_qwen3_asr(audio_path: Path, model_path: str, mmproj_path: str, settings: Settings) -> str:
     """Transcribe using qwen_asr.Qwen3ASRModel."""
-    model = _load_qwen3_asr(model_path)
+    model = _load_qwen3_asr(model_path, mmproj_path)
 
     audio_np, sr = _load_audio_as_float32_mono(audio_path)
     audio_np, sr = _resample_to_16k(audio_np, sr)

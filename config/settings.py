@@ -60,8 +60,9 @@ class Settings:
 
         # Voice / ASR settings
         self.asr_backend = "local"                 # "local" | "api"
-        self.qwen_voice_model_path = ""             # local dir for Qwen3-ASR
-        self.asr_model_path = ""                    # fallback (e.g. whisper) model id/path
+        self.qwen_voice_model_path = r"D:\models\AsrGGUF\Qwen3-ASR-0.6B-Q8_0.gguf"
+        self.qwen_voice_mmproj_path = r"D:\models\AsrGGUF\mmproj-Qwen3-ASR-0.6B-Q8_0.gguf"
+        self.asr_model_path = r"D:\models\AsrGGUF\Qwen3-ASR-0.6B-Q8_0.gguf"
         self.asr_language = "Auto"
         self.asr_sample_rate = 16000
         self.asr_api_url = ""

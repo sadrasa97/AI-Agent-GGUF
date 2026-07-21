@@ -148,6 +148,33 @@ def remember_workspace(path: Path) -> None:
     save_recent_workspaces(deduped)
 
 
+def load_saved_workspace() -> Optional[Path]:
+    """Load last workspace from config, with recent-workspaces fallback."""
+    config_file = CONFIG_DIR / "config.json"
+
+    # First preference: explicit workspace persisted in config.
+    if config_file.exists():
+        try:
+            data = json.loads(config_file.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                raw_workspace = data.get("workspace")
+                if isinstance(raw_workspace, str) and raw_workspace.strip():
+                    candidate = Path(raw_workspace).expanduser().resolve()
+                    if candidate.exists() and candidate.is_dir() and candidate != EMPTY_WORKSPACE_DIR.resolve():
+                        return detect_project_root(candidate)
+        except Exception:
+            pass
+
+    # Fallback: most recent known workspace.
+    recents = load_recent_workspaces()
+    if recents:
+        candidate = Path(recents[0]).expanduser().resolve()
+        if candidate.exists() and candidate.is_dir() and candidate != EMPTY_WORKSPACE_DIR.resolve():
+            return detect_project_root(candidate)
+
+    return None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Nova Code Agent — State-of-the-Art AI Coding IDE",
@@ -204,7 +231,11 @@ def build_settings(args: argparse.Namespace) -> Settings:
     if explicit_workspace:
         settings.workspace = str(explicit_workspace)
     else:
-        settings.workspace = str(EMPTY_WORKSPACE_DIR.resolve())
+        saved_workspace = load_saved_workspace()
+        if saved_workspace:
+            settings.workspace = str(saved_workspace)
+        else:
+            settings.workspace = str(EMPTY_WORKSPACE_DIR.resolve())
 
     # Backend & model settings
     if args.backend:

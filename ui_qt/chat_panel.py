@@ -97,28 +97,41 @@ class GenerationWorker(QObject):
         self.history = history
         self.workspace_context = workspace_context
         self._stop = False
+        self._provider = None
 
     def stop(self):
         self._stop = True
+        if self._provider is not None:
+            try:
+                self._provider.request_stop()
+            except Exception:
+                pass
 
     def run(self):
         try:
             provider = create_provider(self.settings)
+            self._provider = provider
         except ProviderError as exc:
             self.error.emit(str(exc))
             self.finished.emit()
             return
         try:
             for tok in provider.stream(self.history, workspace_context=self.workspace_context):
-                if self._stop:
+                if self._stop or QThread.currentThread().isInterruptionRequested():
                     break
                 self.token.emit(tok)
         except ProviderError as exc:
-            self.error.emit(str(exc))
+            if not self._stop:
+                self.error.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
-            self.error.emit(f"Unexpected error: {exc}")
+            if not self._stop:
+                self.error.emit(f"Unexpected error: {exc}")
         finally:
-            provider.close()
+            try:
+                provider.close()
+            except Exception:
+                pass
+            self._provider = None
             self.finished.emit()
 
 
@@ -226,7 +239,10 @@ class ChatBubble(QFrame):
         },
     }
 
-    CODE_FENCE_RE = re.compile(r"```(?P<lang>[a-zA-Z0-9+#_-]*)\n(?P<code>.*?)```", re.DOTALL)
+    CODE_FENCE_RE = re.compile(
+        r"(?ms)^```(?P<lang>[a-zA-Z0-9+#_-]*)[ \t]*\n(?P<code>.*?)\n^```[ \t]*"
+    )
+    RTL_RE = re.compile(r"[\u0590-\u08FF\uFB1D-\uFDFD\uFE70-\uFEFC]")
 
     retryRequested = Signal()
 
@@ -293,7 +309,9 @@ class ChatBubble(QFrame):
         self.content_col.setSpacing(8)
         outer.addLayout(self.content_col)
 
-        self._prose_font = QFont("Consolas, Menlo, monospace")
+        self._prose_font = QFont("Segoe UI")
+        if hasattr(self._prose_font, "setFamilies"):
+            self._prose_font.setFamilies(["Segoe UI", "Tahoma", "Arial"])
         self._prose_font.setPointSize(10)
 
         self.footer = QHBoxLayout()
@@ -416,6 +434,16 @@ class ChatBubble(QFrame):
         button.setText("✓")
         QTimer.singleShot(900, lambda: button.setText(old))
 
+    @classmethod
+    def _contains_rtl(cls, text: str) -> bool:
+        return bool(cls.RTL_RE.search(text or ""))
+
+    @classmethod
+    def _with_direction(cls, html: str, plain_text: str) -> str:
+        if cls._contains_rtl(plain_text):
+            return f"<div dir='rtl' style='text-align:right;'>{html}</div>"
+        return html
+
     # ------------------------------------------------------------------
     def set_tag(self, text: str):
         if text:
@@ -449,14 +477,17 @@ class ChatBubble(QFrame):
             before = text_form[pos:m.start()].strip("\n")
             if before.strip():
                 lbl = self._make_prose_label()
-                lbl.setText(self._escape(before))
+                lbl.setText(self._with_direction(self._escape(before), before))
                 self.content_col.addWidget(lbl)
             self.content_col.addWidget(self._make_code_card(m.group("lang"), m.group("code")))
             pos = m.end()
         remainder = text_form[pos:].strip("\n")
         if remainder.strip() or not found_any:
             lbl = self._make_prose_label()
-            lbl.setText(self._escape(remainder) if found_any else html)
+            if found_any:
+                lbl.setText(self._with_direction(self._escape(remainder), remainder))
+            else:
+                lbl.setText(self._with_direction(html, text_form))
             self.content_col.addWidget(lbl)
 
     def append_plain(self, text: str):
@@ -475,7 +506,7 @@ class ChatBubble(QFrame):
             self._clear_content_widgets()
             self.content_col.addWidget(self._make_prose_label())
         lbl = self.content_col.itemAt(0).widget()
-        lbl.setText(self._raw_text)
+        lbl.setText(self._with_direction(self._raw_text, self._copy_text))
 
     def finalize_stream(self):
         """Call once streaming is complete to re-render with code cards."""
@@ -527,6 +558,7 @@ class ChatPanel(QWidget):
         "Chat": ("💬", "Ask questions, you choose how to apply code"),
         "Plan": ("🧭", "Model drafts a step-by-step plan first"),
     }
+    THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
     def __init__(self, settings: Settings, get_workspace_context, parent=None):
         super().__init__(parent)
@@ -1225,8 +1257,17 @@ class ChatPanel(QWidget):
         self.agentUndoRequested.emit(paths)
 
     def stop_generation(self):
+        if not self._is_generating:
+            return
+
+        # First click should always register immediately in the UI.
+        self.status_label.setText("Stopping...")
+        self.send_btn.setEnabled(False)
+
         if self._worker:
             self._worker.stop()
+        if self._thread:
+            self._thread.requestInterruption()
 
     def _on_token(self, tok: str):
         if self._current_assistant_bubble is None:
@@ -1264,19 +1305,18 @@ class ChatPanel(QWidget):
     def _on_finished(self):
         self._flush_stream_tokens()
         self._stream_flush_timer.stop()
-        if self._response_buffer.strip():
-            self.history.append({"role": "assistant", "content": self._response_buffer})
+        clean_response = self._sanitize_response_text(self._response_buffer)
+        if clean_response.strip():
+            self.history.append({"role": "assistant", "content": clean_response})
             if self._current_assistant_bubble is not None:
-                self._current_assistant_bubble.set_copy_text(self._response_buffer)
-                self._current_assistant_bubble.finalize_stream()
-            blocks = self._extract_code_blocks(self._response_buffer)
+                self._current_assistant_bubble.set_html(self._escape(clean_response))
+                self._current_assistant_bubble.set_copy_text(clean_response)
+            blocks = self._extract_code_blocks(clean_response)
             applied_paths: list[str] = []
             for lang, code, path in blocks:
                 if self.mode == "Agent" and path:
                     self.agentFileEdit.emit(path, lang, code)
                     applied_paths.append(path)
-                elif not path:
-                    self.codeBlockReady.emit(lang, code)
             if applied_paths:
                 chips = " ".join(
                     f"<span style='background:{Theme.accent_soft_bg};color:{Theme.accent_b};border-radius:8px;"
@@ -1304,6 +1344,7 @@ class ChatPanel(QWidget):
             self._thread.wait()
         self._thread = None
         self._worker = None
+        self.send_btn.setEnabled(True)
         self._set_generation_state(False)
         self._scroll_to_bottom()
 
@@ -1312,13 +1353,20 @@ class ChatPanel(QWidget):
         """Returns (language, code, file_path_or_None) for every fenced block.
         Agent-mode blocks look like ```python file=src/app.py ... ```."""
         pattern = re.compile(
-            r"```(?P<lang>[a-zA-Z0-9+#_-]*)(?:[ \t]+file=(?P<path>[^\s`]+))?\n(?P<code>.*?)```",
-            re.DOTALL,
+            r"(?ms)^```(?P<lang>[a-zA-Z0-9+#_-]*)(?:[ \t]+file=(?P<path>[^\s`]+))?[ \t]*\n"
+            r"(?P<code>.*?)\n^```[ \t]*",
         )
         return [
             (m.group("lang") or "text", m.group("code"), m.group("path"))
             for m in pattern.finditer(text)
         ]
+
+    @classmethod
+    def _sanitize_response_text(cls, text: str) -> str:
+        if not text:
+            return ""
+        cleaned = cls.THINK_RE.sub("", text)
+        return cleaned.strip()
 
     @staticmethod
     def _escape(text: str) -> str:

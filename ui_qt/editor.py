@@ -14,10 +14,13 @@ from PySide6.QtWidgets import (
 from ui_qt.syntax import CodeHighlighter
 from ui_qt.hover_docs import lookup_hover_doc
 
+
 THEMES = {
     "dark": {
         "editor_bg": "#0B0D14", "editor_fg": "#E2E8F0",
-        "gutter_bg": "#0F111A", "gutter_fg": "#5A647D",
+        "gutter_bg": "#0F111A", "gutter_fg": "#8B94A7",
+        "active_line_fg": "#C0C8E2",
+        "gutter_border": "#1E2333",
         "current_line_bg": QColor("#131620"), "selection_bg": "#252B3D",
         "error_bg": QColor("#2D1115"), "error_underline": QColor("#FF2E63"),
         "find_bar_style": """
@@ -40,7 +43,9 @@ THEMES = {
     },
     "light": {
         "editor_bg": "#FFFFFF", "editor_fg": "#1F2937",
-        "gutter_bg": "#F8F9FA", "gutter_fg": "#9CA3AF",
+        "gutter_bg": "#F8F9FA", "gutter_fg": "#6B7280",
+        "active_line_fg": "#1F2937",
+        "gutter_border": "#E5E7EB",
         "current_line_bg": QColor("#F3F4F6"), "selection_bg": "#DBEAFE",
         "error_bg": QColor("#FEE2E2"), "error_underline": QColor("#EF4444"),
         "find_bar_style": """
@@ -65,7 +70,7 @@ THEMES = {
 
 class LineNumberArea(QWidget):
     def __init__(self, editor: "CodeEditor", parent=None):
-        super().__init__(parent)
+        super().__init__(editor if parent is None else parent)
         self.editor = editor
     def sizeHint(self) -> QSize: return QSize(self.editor.line_number_area_width(), 0)
     def paintEvent(self, event): self.editor.line_number_area_paint_event(event)
@@ -86,9 +91,11 @@ class CodeEditor(QPlainTextEdit):
         self.setTabStopDistance(4 * self.fontMetrics().horizontalAdvance(" "))
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self._line_area = LineNumberArea(self)
+        self._line_area.show()
         self.blockCountChanged.connect(self._update_line_area_width)
         self.updateRequest.connect(self._update_line_area)
         self.cursorPositionChanged.connect(self._highlight_current_line)
+        self.cursorPositionChanged.connect(lambda: self._line_area.update())
         self._update_line_area_width(0)
         self._highlight_current_line()
         ext = file_path.suffix.lstrip(".") if file_path else "py"
@@ -100,10 +107,6 @@ class CodeEditor(QPlainTextEdit):
         self.apply_theme("dark")
         self.textChanged.connect(self._mark_dirty)
         self.textChanged.connect(self._queue_diagnostics)
-        # VS-Code-style hover: mouse tracking lets us receive
-        # mouseMoveEvent without a button held down, so we can show a
-        # tooltip for the diagnostic/error under the cursor, or a short
-        # doc blurb for a recognized builtin/keyword/library name.
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
 
@@ -121,9 +124,20 @@ class CodeEditor(QPlainTextEdit):
         super().resizeEvent(event)
         cr = self.contentsRect()
         self._line_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
+        self._line_area.raise_()
+        self._line_area.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_line_area_width(0)
+        self._line_area.show()
+        self._line_area.raise_()
+        self._line_area.update()
     def line_number_area_paint_event(self, event):
         painter = QPainter(self._line_area)
-        painter.fillRect(event.rect(), QColor(THEMES[self.theme]["gutter_bg"]))
+        theme = THEMES[self.theme]
+        painter.fillRect(event.rect(), QColor(theme["gutter_bg"]))
+        current_block_number = self.textCursor().blockNumber()
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()
         top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
@@ -131,12 +145,18 @@ class CodeEditor(QPlainTextEdit):
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 number = str(block_number + 1)
-                painter.setPen(QColor(THEMES[self.theme]["gutter_fg"]))
+                if block_number == current_block_number:
+                    painter.setPen(QColor(theme["active_line_fg"]))
+                else:
+                    painter.setPen(QColor(theme["gutter_fg"]))
                 painter.drawText(0, top, self._line_area.width() - 8, self.fontMetrics().height(), Qt.AlignRight, number)
             block = block.next()
             top = bottom
             bottom = top + int(self.blockBoundingRect(block).height())
             block_number += 1
+        separator_x = self._line_area.width() - 1
+        painter.setPen(QColor(theme["gutter_border"]))
+        painter.drawLine(separator_x, event.rect().top(), separator_x, event.rect().bottom())
     def _highlight_current_line(self):
         extra_selections = []
         if not self.isReadOnly():
@@ -195,7 +215,7 @@ class CodeEditor(QPlainTextEdit):
             if sel.cursor.blockNumber() == cursor.blockNumber():
                 message = sel.format.toolTip()
                 if message:
-                    QToolTip.showText(global_pos, f"⚠ {message}", self)
+                    QToolTip.showText(global_pos, f"\u26a0 {message}", self)
                     return
 
         # 2) Otherwise, look up the word under the cursor against the
@@ -246,23 +266,23 @@ class FindReplaceBar(QFrame):
         self.word_btn.setToolTip("Match Whole Word")
         self.word_btn.toggled.connect(lambda _c: self._on_find_text_changed())
         find_row.addWidget(self.word_btn)
-        prev_btn = QPushButton("˄")
+        prev_btn = QPushButton("\u02c4")
         prev_btn.setObjectName("toolBtn")
         prev_btn.setToolTip("Previous Match (Shift+Enter)")
         prev_btn.clicked.connect(self.find_prev)
         find_row.addWidget(prev_btn)
-        next_btn = QPushButton("˅")
+        next_btn = QPushButton("\u02c5")
         next_btn.setObjectName("toolBtn")
         next_btn.setToolTip("Next Match (Enter)")
         next_btn.clicked.connect(self.find_next)
         find_row.addWidget(next_btn)
-        self.toggle_replace_btn = QPushButton("⋯")
+        self.toggle_replace_btn = QPushButton("\u22ef")
         self.toggle_replace_btn.setObjectName("toolBtn")
         self.toggle_replace_btn.setCheckable(True)
         self.toggle_replace_btn.setToolTip("Toggle Replace (Ctrl+H)")
         self.toggle_replace_btn.toggled.connect(self._on_toggle_replace)
         find_row.addWidget(self.toggle_replace_btn)
-        close_btn = QPushButton("✕")
+        close_btn = QPushButton("\u2715")
         close_btn.setObjectName("toolBtn")
         close_btn.setToolTip("Close (Esc)")
         close_btn.clicked.connect(self.hide_bar)
@@ -383,9 +403,16 @@ class EditorPage(QWidget):
     @property
     def is_dirty(self): return self.editor.is_dirty
 
+
+def _is_markdown_path(path: Path) -> bool:
+    """Check if a file path is a markdown file."""
+    return path.suffix.lower() in (".md", ".mdx", ".markdown", ".rmd")
+
+
 class EditorTabs(QTabWidget):
     fileSaved = Signal(Path)
     activeFileChanged = Signal(object)
+    fileBufferStatsChanged = Signal(object, int, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -399,17 +426,33 @@ class EditorTabs(QTabWidget):
         path = Path(path)
         for i in range(self.count()):
             page = self.widget(i)
-            if page.editor.file_path == path: self.setCurrentIndex(i); return
+            if hasattr(page, 'editor') and page.editor.file_path == path:
+                self.setCurrentIndex(i); return
+            if hasattr(page, 'file_path') and page.file_path == path:
+                self.setCurrentIndex(i); return
         try: text = path.read_text(encoding="utf-8", errors="replace")
         except Exception as exc: QMessageBox.critical(self, "Error", f"Could not open {path}:\n{exc}"); return
-        editor = CodeEditor(file_path=path)
-        editor.setPlainText(text); editor.mark_clean()
-        page = EditorPage(editor)
+
+        # Markdown files use the special MarkdownEditorPage with Edit/Preview/Split modes
+        if _is_markdown_path(path):
+            from ui_qt.markdown_viewer import MarkdownEditorPage
+            page = MarkdownEditorPage(file_path=path)
+            page.editor.setPlainText(text)
+            page.editor.mark_clean()
+        else:
+            editor = CodeEditor(file_path=path)
+            editor.setPlainText(text); editor.mark_clean()
+            page = EditorPage(editor)
+
         idx = self.addTab(page, path.name)
         self._install_close_button(idx)
         self.setCurrentIndex(idx)
         self.setTabToolTip(idx, str(path))
-        page.find_bar.apply_theme(self.theme); page.editor.apply_theme(self.theme)
+        self._attach_editor_signals(page.editor)
+        if isinstance(page, EditorPage):
+            page.find_bar.apply_theme(self.theme)
+        page.editor.apply_theme(self.theme)
+        self.fileBufferStatsChanged.emit(page.editor.file_path, page.editor.blockCount(), False)
 
     def new_untitled(self, template_code: str = "", language: str = "py"):
         self._untitled_count += 1
@@ -422,8 +465,20 @@ class EditorTabs(QTabWidget):
         idx = self.addTab(page, title)
         self._install_close_button(idx)
         self.setCurrentIndex(idx)
+        self._attach_editor_signals(page.editor)
         page.find_bar.apply_theme(self.theme); page.editor.apply_theme(self.theme)
         return editor
+
+    def _attach_editor_signals(self, editor: CodeEditor):
+        if getattr(editor, "_stats_wired", False):
+            return
+        editor._stats_wired = True
+        editor.textChanged.connect(lambda e=editor: self._on_editor_text_changed(e))
+
+    def _on_editor_text_changed(self, editor: CodeEditor):
+        self.mark_tab_dirty_titles()
+        if editor.file_path:
+            self.fileBufferStatsChanged.emit(editor.file_path, editor.blockCount(), editor.is_dirty)
 
     def current_editor(self) -> Optional[CodeEditor]:
         page = self.currentWidget()
@@ -444,6 +499,7 @@ class EditorTabs(QTabWidget):
         idx = self.indexOf(page)
         self.setTabText(idx, path.name); self.setTabToolTip(idx, str(path))
         self.fileSaved.emit(path)
+        self.fileBufferStatsChanged.emit(path, editor.blockCount(), False)
 
     def _close_tab(self, index: int):
         if index < 0 or index >= self.count(): return
@@ -455,22 +511,24 @@ class EditorTabs(QTabWidget):
             if resp == QMessageBox.Yes: self.setCurrentIndex(index); self.save_current()
         self.removeTab(index)
 
-    def _on_current_changed(self, index: int):
-        page = self.widget(index) if index >= 0 else None
-        self.activeFileChanged.emit(page.editor.file_path if page else None)
-
     def apply_theme(self, theme: str):
         self.theme = theme if theme in THEMES else "dark"
         spec = THEMES[self.theme]
         self.setStyleSheet(spec["tabs_style"])
         for i in range(self.count()):
             page = self.widget(i)
-            page.editor.apply_theme(self.theme); page.find_bar.apply_theme(self.theme)
+            page.editor.apply_theme(self.theme)
+            if hasattr(page, "find_bar"):
+                page.find_bar.apply_theme(self.theme)
             self._install_close_button(i)
+
+    def _on_current_changed(self, _index: int):
+        editor = self.current_editor()
+        self.activeFileChanged.emit(editor.file_path if editor else None)
 
     def _install_close_button(self, index: int):
         btn = QToolButton(self)
-        btn.setText("×"); btn.setAutoRaise(True); btn.setCursor(Qt.ArrowCursor); btn.setFixedSize(16, 16)
+        btn.setText("\u00d7"); btn.setAutoRaise(True); btn.setCursor(Qt.ArrowCursor); btn.setFixedSize(16, 16)
         btn.setStyleSheet(THEMES[self.theme]["tab_close_btn"])
         btn.clicked.connect(lambda _=False, b=btn: self._close_tab(self._index_for_close_button(b)))
         self.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, btn)

@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: Settings):
         super().__init__()
         self.settings = settings
+        self._status_editor = None
         self._last_generated_block: CodeBlock | None = None
         # rel_path -> stack of previous file contents (None = file didn't exist
         # before that edit), most recent edit last — used by the chat "Undo" button.
@@ -197,6 +198,7 @@ class MainWindow(QMainWindow):
         self.explorer.runRequested.connect(self._run_path)
         self.explorer.newFileRequested.connect(self._create_file_in_directory)
         self.explorer.newFolderRequested.connect(self._create_folder_in_directory)
+        self.editor_tabs.fileBufferStatsChanged.connect(self.explorer.update_file_stats)
         explorer_dock = QDockWidget("EXPLORER", self)
         explorer_dock.setWidget(self.explorer)
         explorer_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -239,12 +241,82 @@ class MainWindow(QMainWindow):
 
         # Use a VS Code-like top menu bar (File/Edit/View/Go/Run/Terminal/Help).
         self._build_menus()
+        self._build_status_bar()
         self._set_code_editor_visible(self.settings.show_code_editor, save=False)
         self._apply_theme(self.settings.ui_theme, save=False)
 
         self.editor_tabs.activeFileChanged.connect(self._on_active_file_changed)
         self.editor_tabs.currentChanged.connect(lambda _i: self._sync_undo_redo_state())
         self._sync_undo_redo_state()
+        self._attach_status_editor_signals()
+        self._update_status_bar_info()
+        self._update_cursor_status()
+
+    def _build_status_bar(self):
+        bar = self.statusBar()
+        bar.setSizeGripEnabled(False)
+
+        self.status_backend = QLabel()
+        self.status_model = QLabel()
+        self.status_workspace = QLabel()
+        self.status_cursor = QLabel("Ln 1, Col 1")
+        self.status_lines = QLabel("Lines 0")
+
+        for widget in (
+            self.status_backend,
+            self.status_model,
+            self.status_workspace,
+            self.status_cursor,
+            self.status_lines,
+        ):
+            widget.setStyleSheet("padding: 0 8px;")
+
+        bar.addWidget(self.status_backend)
+        bar.addWidget(self.status_model)
+        bar.addWidget(self.status_workspace, 1)
+        bar.addPermanentWidget(self.status_cursor)
+        bar.addPermanentWidget(self.status_lines)
+
+    def _update_status_bar_info(self):
+        self.status_backend.setText(f"Backend: {self.settings.backend}")
+        self.status_model.setText(f"Model: {self.settings.model_name}")
+        self.status_workspace.setText(f"Workspace: {self.settings.workspace_path}")
+
+    def _attach_status_editor_signals(self):
+        editor = self.editor_tabs.current_editor()
+
+        if self._status_editor is editor:
+            return
+
+        if self._status_editor is not None:
+            try:
+                self._status_editor.cursorPositionChanged.disconnect(self._update_cursor_status)
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                self._status_editor.blockCountChanged.disconnect(self._update_cursor_status)
+            except (TypeError, RuntimeError):
+                pass
+
+        self._status_editor = editor
+
+        if editor is not None:
+            editor.cursorPositionChanged.connect(self._update_cursor_status)
+            editor.blockCountChanged.connect(self._update_cursor_status)
+
+    def _update_cursor_status(self):
+        editor = self.editor_tabs.current_editor()
+        if editor is None:
+            self.status_cursor.setText("Ln -, Col -")
+            self.status_lines.setText("Lines 0")
+            return
+
+        cursor = editor.textCursor()
+        line = cursor.blockNumber() + 1
+        col = cursor.columnNumber() + 1
+        lines = editor.blockCount()
+        self.status_cursor.setText(f"Ln {line}, Col {col}")
+        self.status_lines.setText(f"Lines {lines}")
 
     # ──────────────────────────────────────────────────────────────
     # Menus
@@ -537,13 +609,10 @@ class MainWindow(QMainWindow):
             self.settings.save()
             self.explorer.set_workspace(Path(folder))
             self.output_panel.set_working_directory(Path(folder))
+            self._update_status_bar_info()
 
     def _selected_base_directory(self) -> Path:
-        index = self.explorer.tree.currentIndex()
-        if index.isValid():
-            selected = Path(self.explorer.model.filePath(index))
-            return selected if selected.is_dir() else selected.parent
-        return self.settings.workspace_path
+        return self.explorer.selected_base_directory()
 
     def _create_new_file(self):
         self._create_file_in_directory(self._selected_base_directory())
@@ -578,8 +647,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Create File Failed", str(exc))
             return
 
-        self.explorer.model.setRootPath(str(self.settings.workspace_path))
-        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+        self.explorer.refresh()
         self.editor_tabs.open_file(target)
 
     def _create_folder_in_directory(self, base_dir: Path):
@@ -608,8 +676,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Create Folder Failed", str(exc))
             return
 
-        self.explorer.model.setRootPath(str(self.settings.workspace_path))
-        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+        self.explorer.refresh()
 
     def _active_editor_call(self, method_name: str):
         editor = self.editor_tabs.current_editor()
@@ -621,6 +688,8 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(f"{Path(path).name} — Nova Code Agent")
         else:
             self.setWindowTitle("Nova Code Agent — IDE")
+        self._attach_status_editor_signals()
+        self._update_cursor_status()
 
     # ──────────────────────────────────────────────────────────────
     # Run
@@ -660,10 +729,9 @@ class MainWindow(QMainWindow):
         return build_workspace_context(self.settings.workspace_path, recent_files=recent)
 
     def _on_code_block_from_chat(self, language: str, code: str):
-        """Apply generated code in a user-selected way (replace/insert/new/save)."""
+        """Cache generated code for manual apply, without interruptive popups."""
         block = CodeBlock(language, code)
         self._last_generated_block = block
-        self._apply_generated_code_block(block)
 
     def _on_agent_file_edit(self, rel_path: str, language: str, code: str):
         """Agent mode: write the model's output straight to disk, the same way
@@ -699,8 +767,7 @@ class MainWindow(QMainWindow):
         self._agent_undo_stacks.setdefault(rel_key, []).append(previous_content if not is_new else None)
 
         # refresh explorer so newly created files/folders show up
-        self.explorer.model.setRootPath(str(self.settings.workspace_path))
-        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+        self.explorer.refresh()
 
         # reflect the change in an already-open tab, or open a new one
         existing_editor = None
@@ -770,8 +837,7 @@ class MainWindow(QMainWindow):
                         page.editor.mark_clean()
                     break
 
-        self.explorer.model.setRootPath(str(self.settings.workspace_path))
-        self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+        self.explorer.refresh()
 
         if reverted:
             self.output_panel.output.appendPlainText(f"[agent] reverted: {', '.join(reverted)}")
@@ -844,8 +910,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.critical(self, "Save Failed", str(exc))
                 return
-            self.explorer.model.setRootPath(str(self.settings.workspace_path))
-            self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+            self.explorer.refresh()
             self.editor_tabs.open_file(out_path)
             return
 
@@ -858,8 +923,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Save Failed", str(exc))
                 return
 
-            self.explorer.model.setRootPath(str(self.settings.workspace_path))
-            self.explorer.tree.setRootIndex(self.explorer.model.index(str(self.settings.workspace_path)))
+            self.explorer.refresh()
             self.editor_tabs.open_file(out_path)
             self._run_path(out_path)
 
@@ -884,6 +948,7 @@ class MainWindow(QMainWindow):
         dialog = ModelSettingsDialog(self.settings, self)
         if dialog.exec():
             self.chat_panel.sync_backend_combo(self.settings.backend)
+            self._update_status_bar_info()
 
     def _apply_last_generated_code(self):
         if self._last_generated_block is None:

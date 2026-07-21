@@ -59,6 +59,10 @@ class BaseProvider:
     def close(self):
         pass
 
+    def request_stop(self):
+        """Request a cooperative stop for in-flight streaming operations."""
+        pass
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Local GGUF backend (llama-cpp-python)
@@ -69,6 +73,7 @@ class GGUFProvider(BaseProvider):
     def __init__(self, settings: Settings):
         super().__init__(settings)
         self._llm = None
+        self._stop_requested = False
         self._load()
 
     def _load(self):
@@ -118,6 +123,7 @@ class GGUFProvider(BaseProvider):
         return "\n".join(parts)
 
     def stream(self, history, workspace_context=None, max_tokens=None) -> Iterator[str]:
+        self._stop_requested = False
         prompt = self._build_prompt(history, workspace_context)
         out = self._llm(
             prompt,
@@ -130,7 +136,12 @@ class GGUFProvider(BaseProvider):
             stream=True,
         )
         for chunk in out:
+            if self._stop_requested:
+                break
             yield chunk["choices"][0]["text"]
+
+    def request_stop(self):
+        self._stop_requested = True
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -143,9 +154,16 @@ class _OpenAICompatibleProvider(BaseProvider):
     model: str = ""
     extra_headers: dict = {}
 
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        self._stop_requested = False
+        self._active_response = None
+
     def stream(self, history, workspace_context=None, max_tokens=None) -> Iterator[str]:
         if not self.api_key:
             raise ProviderError(f"{self.name}: API key not configured.")
+
+        self._stop_requested = False
 
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         payload = {
@@ -164,10 +182,13 @@ class _OpenAICompatibleProvider(BaseProvider):
 
         try:
             with requests.post(url, headers=headers, json=payload, stream=True, timeout=120) as resp:
+                self._active_response = resp
                 if resp.status_code != 200:
                     detail = resp.text[:500]
                     raise ProviderError(f"{self.name} API error {resp.status_code}: {detail}")
                 for raw_line in resp.iter_lines(decode_unicode=True):
+                    if self._stop_requested:
+                        break
                     if not raw_line:
                         continue
                     line = raw_line.strip()
@@ -186,9 +207,23 @@ class _OpenAICompatibleProvider(BaseProvider):
                     delta = choices[0].get("delta") or {}
                     token = delta.get("content")
                     if token:
+                        if self._stop_requested:
+                            break
                         yield token
         except requests.exceptions.RequestException as exc:
+            if self._stop_requested:
+                return
             raise ProviderError(f"{self.name} request failed: {exc}") from exc
+        finally:
+            self._active_response = None
+
+    def request_stop(self):
+        self._stop_requested = True
+        if self._active_response is not None:
+            try:
+                self._active_response.close()
+            except Exception:
+                pass
 
 
 class OpenRouterProvider(_OpenAICompatibleProvider):
